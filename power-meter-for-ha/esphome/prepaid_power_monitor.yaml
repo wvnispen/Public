@@ -1,0 +1,352 @@
+# ============================================================
+# Power Meter for Home Assistant v1.0
+# ============================================================
+# Hardware:
+#   - ESP32-C6 (any variant)
+#   - SCTD-016-T 100A/0-5VDC CT Clamp → GPIO2
+#   - 0.91" SSD1306 I2C OLED (128x32) → GPIO6/GPIO7
+#   - 2x 10kΩ resistors (voltage divider)
+#
+# Wiring:
+#   CT (+) → 10kΩ → GPIO2 → 10kΩ → GND
+#   CT (-) → GND
+#   OLED: GND→GND, VCC→3.3V, SCK→GPIO7, SDA→GPIO6
+#
+# Calibration:
+#   Set 'Current Calibration' in HA after testing with
+#   a known resistive load (kettle/heater).
+#   Formula: Calibration = Rated Watts ÷ Measured Watts
+#
+# Author: Community contribution — Johannesburg, SA 🇿🇦
+# License: MIT
+# ============================================================
+
+esphome:
+  name: prepaid-power-monitor
+  friendly_name: Prepaid Power Monitor
+
+esp32:
+  board: esp32-c6-devkitc-1
+  variant: esp32c6
+  framework:
+    type: esp-idf             # Required — Arduino not supported on C6
+
+logger:
+  level: INFO
+  hardware_uart: USB_SERIAL_JTAG
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Prepaid-Monitor"
+    password: !secret ap_password
+
+web_server:
+  port: 80
+
+# ────────────────────────────────────────────────────────────
+# I2C Bus — SDA=GPIO6, SCK(SCL)=GPIO7
+# Note: 100kHz used for stability on C6 with esp-idf
+# ────────────────────────────────────────────────────────────
+i2c:
+  sda: GPIO6
+  scl: GPIO7
+  scan: false
+  frequency: 100kHz
+
+# ────────────────────────────────────────────────────────────
+# Time — synced from Home Assistant
+# ────────────────────────────────────────────────────────────
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+
+# ────────────────────────────────────────────────────────────
+# Fonts for OLED display
+# ────────────────────────────────────────────────────────────
+font:
+  - file: "gfonts://Roboto"
+    id: font_large
+    size: 20
+
+  - file: "gfonts://Roboto"
+    id: font_medium
+    size: 12
+
+  - file: "gfonts://Roboto"
+    id: font_small
+    size: 9
+
+# ────────────────────────────────────────────────────────────
+# 0.91" SSD1306 OLED Display (128x32)
+# If blank: try address 0x3D instead of 0x3C
+# If still blank: try model "SH1106 128x32"
+# ────────────────────────────────────────────────────────────
+display:
+  - platform: ssd1306_i2c
+    model: "SSD1306 128x32"
+    address: 0x3C
+    id: oled_display
+    update_interval: 1s
+    lambda: |-
+      // Cycle through 3 pages every 5 seconds
+      int page = (millis() / 5000) % 3;
+
+      if (page == 0) {
+        // ── PAGE 1: Live power & current ──
+        if (id(grid_power).state >= 1000) {
+          it.printf(0, 0, id(font_large), "%.2fkW",
+            id(grid_power).state / 1000.0);
+        } else {
+          it.printf(0, 0, id(font_large), "%.0fW",
+            id(grid_power).state);
+        }
+        it.printf(0, 22, id(font_small), "%.2fA  %.0fV",
+          id(grid_current).state,
+          id(voltage_setpoint).state);
+
+      } else if (page == 1) {
+        // ── PAGE 2: Daily energy & cost ──
+        it.printf(0, 0,  id(font_medium), "%.3f kWh today",
+          id(grid_energy_daily).state);
+        it.printf(0, 16, id(font_small),  "Cost: R%.2f",
+          id(daily_cost).state);
+
+      } else {
+        // ── PAGE 3: Prepaid balance from HA tracker ──
+        it.printf(0, 0,  id(font_medium), "Bal: %.1f kWh",
+          id(prepaid_balance).state);
+        it.printf(0, 16, id(font_small),  "Days left: %.1f",
+          id(days_remaining).state);
+      }
+
+# ────────────────────────────────────────────────────────────
+# Sensors
+# ────────────────────────────────────────────────────────────
+sensor:
+  # ── CT Clamp ADC ──────────────────────────────────────────
+  # GPIO2 = ADC1_CH2 — safe to use with WiFi active on C6
+  # The 2x 10kΩ voltage divider scales 5V → 2.5V for ADC
+  # We compensate with multiply: 2.0 below
+  - platform: adc
+    pin: GPIO2
+    id: ct_voltage_raw
+    name: "CT Voltage Raw"
+    update_interval: 0.5s
+    accuracy_decimals: 4
+    attenuation: 12db             # 0-3.3V range (esp-idf uses 12db)
+    filters:
+      - sliding_window_moving_average:
+          window_size: 20         # Average 20 samples for stability
+          send_every: 10
+      - multiply: 2.0             # Compensate for voltage divider
+      - calibrate_linear:         # Map 0-3.3V ADC → 0-5V CT output
+          - 0.00 -> 0.00
+          - 3.30 -> 5.00
+      - lambda: return (x < 0.15) ? 0.0 : x;  # Zero noise below 3A
+
+  # ── Grid Current ──────────────────────────────────────────
+  - platform: template
+    name: "Grid Current"
+    id: grid_current
+    unit_of_measurement: "A"
+    device_class: current
+    state_class: measurement
+    accuracy_decimals: 2
+    update_interval: 2s
+    lambda: |-
+      // Wait 30s on boot for ADC filters to settle
+      // Prevents ghost energy accumulation on startup
+      if (millis() < 30000) return 0.0f;
+      // SCTD-016-T: 100A = 5V (linear ratio)
+      float voltage = id(ct_voltage_raw).state;
+      float current = (voltage / 5.0f) * 100.0f;
+      current = current * id(current_calibration).state;
+      // 0.5A noise gate (~115W minimum detectable load)
+      return (current < 0.5f) ? 0.0f : current;
+    icon: "mdi:current-ac"
+
+  # ── Grid Power ────────────────────────────────────────────
+  # P = V × I × PF
+  # For resistive loads (kettle, geyser): set PF = 1.00
+  # For mixed household loads: set PF = 0.95-0.98
+  - platform: template
+    name: "Grid Power"
+    id: grid_power
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: 2s
+    lambda: |-
+      if (millis() < 30000) return 0.0f;
+      float power = id(voltage_setpoint).state
+                  * id(grid_current).state
+                  * id(power_factor_setting).state;
+      // 100W dead band prevents noise accumulation
+      return (power < 100.0f) ? 0.0f : power;
+    icon: "mdi:flash"
+
+  # ── Grid Voltage ──────────────────────────────────────────
+  # Fixed SA reference. Add ZMPT101B module for true measurement.
+  - platform: template
+    name: "Grid Voltage"
+    id: grid_voltage_sensor
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: 60s
+    lambda: return id(voltage_setpoint).state;
+    icon: "mdi:sine-wave"
+
+  # ── Daily Cost (Block 1 tariff rate) ──────────────────────
+  # Update the rate constant below to match your current tariff
+  # City Power JHB 2024/25: Block 1 = R3.9094/kWh (VAT incl)
+  - platform: template
+    name: "Daily Cost"
+    id: daily_cost
+    unit_of_measurement: "R"
+    accuracy_decimals: 2
+    update_interval: 60s
+    lambda: return id(grid_energy_daily).state * 3.9094f;
+    icon: "mdi:cash"
+
+  # ── Daily Energy ──────────────────────────────────────────
+  # Resets at midnight automatically
+  - platform: total_daily_energy
+    name: "Grid Energy Daily"
+    id: grid_energy_daily
+    power_id: grid_power
+    unit_of_measurement: "kWh"
+    state_class: total_increasing
+    device_class: energy
+    accuracy_decimals: 3
+    icon: "mdi:lightning-bolt"
+
+  # ── Total Energy ──────────────────────────────────────────
+  # Lifetime cumulative — never resets
+  - platform: integration
+    name: "Grid Energy Total"
+    id: grid_energy_total
+    sensor: grid_power
+    time_unit: h
+    unit_of_measurement: "kWh"
+    state_class: total_increasing
+    device_class: energy
+    accuracy_decimals: 3
+    icon: "mdi:counter"
+
+  # ── Prepaid Balance (from HA Prepaid Tracker) ─────────────
+  # Remove these if not using the Prepaid Electricity Tracker
+  - platform: homeassistant
+    name: "Prepaid Balance"
+    id: prepaid_balance
+    entity_id: sensor.prepaid_electricity_current_balance
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 1
+
+  - platform: homeassistant
+    name: "Days Remaining"
+    id: days_remaining
+    entity_id: sensor.prepaid_electricity_days_remaining
+    accuracy_decimals: 1
+
+  # ── Diagnostics ───────────────────────────────────────────
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+
+  - platform: uptime
+    name: "Uptime"
+    update_interval: 60s
+
+# ────────────────────────────────────────────────────────────
+# Calibration Controls — adjustable from HA UI (no reflash)
+# ────────────────────────────────────────────────────────────
+number:
+  # Calibration multiplier
+  # Formula: Rated Watts ÷ Measured Watts
+  # Example: 2760W ÷ 2625W = 1.051
+  - platform: template
+    name: "Current Calibration"
+    id: current_calibration
+    optimistic: true
+    min_value: 0.50
+    max_value: 1.50
+    initial_value: 1.00
+    step: 0.001
+    mode: box
+    icon: "mdi:tune"
+    entity_category: config
+
+  # Grid voltage reference (SA standard = 230V)
+  - platform: template
+    name: "Voltage Setpoint"
+    id: voltage_setpoint
+    optimistic: true
+    min_value: 220
+    max_value: 240
+    initial_value: 230
+    step: 1
+    mode: box
+    unit_of_measurement: "V"
+    icon: "mdi:sine-wave"
+    entity_category: config
+
+  # Power factor
+  # 1.00 = pure resistive (kettle, geyser, heater)
+  # 0.95 = typical mixed household
+  - platform: template
+    name: "Power Factor"
+    id: power_factor_setting
+    optimistic: true
+    min_value: 0.80
+    max_value: 1.00
+    initial_value: 1.00
+    step: 0.01
+    mode: slider
+    icon: "mdi:cosine-wave"
+    entity_category: config
+
+# ────────────────────────────────────────────────────────────
+# Buttons
+# ────────────────────────────────────────────────────────────
+button:
+  - platform: restart
+    name: "Restart Monitor"
+    icon: "mdi:restart"
+    entity_category: config
+
+# ────────────────────────────────────────────────────────────
+# Binary Sensors
+# ────────────────────────────────────────────────────────────
+binary_sensor:
+  - platform: status
+    name: "Monitor Status"
+    id: monitor_status
+
+  # Fires when load exceeds 7kW (single phase SA limit = ~7.5kW)
+  - platform: template
+    name: "High Power Alert"
+    device_class: problem
+    lambda: return id(grid_power).state > 7000.0f;
+
+# ────────────────────────────────────────────────────────────
+# Text Sensors
+# ────────────────────────────────────────────────────────────
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+    ssid:
+      name: "Connected SSID"
