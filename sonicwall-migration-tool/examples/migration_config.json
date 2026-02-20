@@ -1,0 +1,17 @@
+{
+    "source": {
+        "host": "192.168.8.1",
+        "port": 4433,
+        "username": "admin",
+        "password": "your_password_here"
+    },
+    "target": {
+        "host": "192.168.8.2",
+        "port": 443,
+        "username": "admin",
+        "password": "your_password_here"
+    },
+    "skip_resources": [],
+    "migrate_interfaces": true,
+    "dry_run": false
+}
