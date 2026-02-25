@@ -124,7 +124,24 @@ class SonicWallAPI:
             if resp.status_code == 200:
                 self.authenticated = True
                 logger.info(f"[{self.label}] Login successful.")
+
+                # Extract model from auth response if available
+                try:
+                    auth_data = resp.json()
+                    info_list = auth_data.get("status", {}).get("info", [])
+                    if info_list:
+                        auth_info = info_list[0]
+                        if auth_info.get("model"):
+                            self.model = auth_info["model"]
+                            logger.debug(f"[{self.label}] Model from auth: {self.model}")
+                except Exception:
+                    pass
+
                 self._detect_firmware()
+
+                # Enter config mode — required by SonicOS 7.x+ for write operations
+                self._enter_config_mode()
+
                 return True
             else:
                 logger.error(f"[{self.label}] Login failed: HTTP {resp.status_code}")
@@ -140,6 +157,18 @@ class SonicWallAPI:
             logger.error(f"[{self.label}] Login error: {e}")
             return False
 
+    def _enter_config_mode(self):
+        """Enter config mode on the firewall — required for write operations on Gen 7+."""
+        try:
+            resp = self.session.post(f"{self.base_url}/config-mode", timeout=15)
+            if resp.status_code == 200:
+                logger.info(f"[{self.label}] Entered config mode.")
+            else:
+                # Some firmware versions may not need this or use a different path
+                logger.debug(f"[{self.label}] config-mode returned HTTP {resp.status_code} (may not be required)")
+        except Exception as e:
+            logger.debug(f"[{self.label}] config-mode request failed: {e} (may not be required)")
+
     def logout(self):
         """Logout from the SonicWall API."""
         if self.authenticated:
@@ -151,35 +180,77 @@ class SonicWallAPI:
             self.authenticated = False
 
     def _detect_firmware(self):
-        """Detect firmware version and generation from the status endpoint."""
-        try:
-            resp = self._get("status")
-            if resp and isinstance(resp, dict):
-                # Try common response structures
-                info = resp.get("status", resp)
-                fw = (info.get("firmware_version") or
-                      info.get("firmware") or
-                      info.get("info", [{}])[0].get("firmware_version", ""))
-                model = (info.get("model") or
-                         info.get("product_model") or "Unknown")
-                self.firmware_version = str(fw)
-                self.model = str(model)
-                self._classify_generation()
-                logger.info(
-                    f"[{self.label}] Detected: Model={self.model}, "
-                    f"Firmware={self.firmware_version}, Gen={self.generation}"
-                )
-        except Exception:
+        """Detect firmware version and generation from API endpoints."""
+        # Try multiple endpoints — different SonicOS versions use different paths
+        endpoints = [
+            "status",
+            "version",
+            "administration/status",
+        ]
+        for ep in endpoints:
+            try:
+                resp = self._get(ep)
+                if resp and isinstance(resp, dict):
+                    # Flatten nested structures to find firmware/model keys
+                    fw, model = self._find_fw_model(resp)
+                    if fw:
+                        self.firmware_version = str(fw)
+                    if model and self.model in (None, "Unknown"):
+                        self.model = str(model)
+                    if self.firmware_version:
+                        break
+            except Exception:
+                continue
+
+        # Classify generation
+        self._classify_generation()
+
+        if self.firmware_version or self.model:
+            logger.info(
+                f"[{self.label}] Detected: Model={self.model}, "
+                f"Firmware={self.firmware_version}, Gen={self.generation}"
+            )
+        else:
             logger.warning(f"[{self.label}] Could not auto-detect firmware version.")
+
+    @staticmethod
+    def _find_fw_model(data: dict, depth: int = 0) -> tuple:
+        """Recursively search a response dict for firmware and model fields."""
+        if depth > 3:
+            return None, None
+        fw = None
+        model = None
+        for key, val in data.items():
+            key_lower = key.lower()
+            if isinstance(val, str):
+                if "firmware" in key_lower and "version" in key_lower:
+                    fw = val
+                elif key_lower == "firmware":
+                    fw = val
+                elif key_lower == "model" or key_lower == "product_model":
+                    model = val
+            elif isinstance(val, dict):
+                sub_fw, sub_model = SonicWallAPI._find_fw_model(val, depth + 1)
+                if sub_fw:
+                    fw = sub_fw
+                if sub_model:
+                    model = sub_model
+            elif isinstance(val, list) and val and isinstance(val[0], dict):
+                sub_fw, sub_model = SonicWallAPI._find_fw_model(val[0], depth + 1)
+                if sub_fw:
+                    fw = sub_fw
+                if sub_model:
+                    model = sub_model
+        return fw, model
 
     def _classify_generation(self):
         """Classify the generation from the firmware version string."""
         fw = self.firmware_version or ""
-        if fw.startswith("8.") or "8.0" in fw:
+        if "8." in fw or fw.startswith("8"):
             self.generation = "Gen8"
-        elif fw.startswith("7.") or "7.0" in fw or "7.1" in fw:
+        elif "7." in fw or fw.startswith("7"):
             self.generation = "Gen7"
-        elif fw.startswith("6.") or "6.5" in fw:
+        elif "6." in fw or fw.startswith("6"):
             self.generation = "Gen6"
         else:
             self.generation = "Unknown"
@@ -745,6 +816,59 @@ class SonicWallMigrator:
         if item.get("not_editable") is True:
             return True
 
+        # ----- Auto-generated interface address objects -----
+        # These are created automatically per-interface (X0 IP, X0 Subnet,
+        # X1 Default Gateway, etc.) and are read-only on the target.
+        # They'll be regenerated when interfaces are configured.
+        if "Address" in resource_name:
+            import re
+            # Match patterns like: X0 IP, X1 Subnet, X2 Default Gateway,
+            # MGMT IP, U0 IP, X0 IPv6 Link-Local Address, etc.
+            iface_pattern = re.compile(
+                r'^(X\d+|U\d+|MGMT|X\d+:V\d+)\s+'
+                r'(IP|Subnet|Default Gateway|IPv6|SonicPoints).*$'
+            )
+            if iface_pattern.match(name):
+                return True
+
+            # System-generated aggregate objects
+            system_names = {
+                "Default Gateway", "Default Active WAN IP",
+                "Dial-Up Default Gateway", "MGMT Default Gateway",
+                "WAN RemoteAccess Networks", "WLAN RemoteAccess Networks",
+                "LAN Subnets", "WAN Subnets", "DMZ Subnets",
+                "LAN Interface IP", "WAN Interface IP", "DMZ Interface IP",
+                "Firewalled Subnets", "All WAN IP", "All Interface IP",
+                "IPv6 Link-Local Subnet", "Well-Known Pref64",
+                "Firewalled IPv6 Subnets",
+                "Prefixes from DHCPC6 Delegation",
+            }
+            if name in system_names:
+                return True
+
+            # Patterns: "All X0 Management IP", "Office Subnets", etc.
+            if name.startswith("All ") and ("Management IP" in name or
+                                             "Management IPv6" in name or
+                                             "Interface" in name):
+                return True
+
+            # Zone-derived auto objects: "<ZoneName> Subnets", "<ZoneName> Interface IP"
+            if name.endswith(" Subnets") or name.endswith(" Interface IP"):
+                return True
+
+            # IPv6 per-interface groups
+            if "IPv6 Addresses" in name:
+                return True
+
+            # SSO/RADIUS system groups
+            system_groups = {
+                "Firewall SSO Agents", "RADIUS Accounting Clients",
+                "Firewall Terminal Services Agents",
+                "SSO 3rd-Party API Clients",
+            }
+            if name in system_groups:
+                return True
+
         return False
 
     @staticmethod
@@ -752,17 +876,48 @@ class SonicWallMigrator:
         """
         Remove read-only / source-specific fields before importing.
         UUIDs are regenerated by the target. Statistics fields are irrelevant.
+        Also strips empty objects and fields that cause cross-generation
+        schema validation errors.
         """
         keys_to_remove = [
             "uuid", "statistics", "hit_count", "id", "index",
             "not_editable", "default", "readonly",
         ]
+
+        # Fields that cause cross-generation schema issues.
+        # These are fields where the type changed between Gen 6/7/8
+        # (e.g., boolean in one gen, object in another, number vs object).
+        cross_gen_problematic = [
+            "geo_ip_filter",         # bool on Gen6/8, object on Gen7
+            "botnet_filter",         # same pattern
+            "decrement_ttl",         # same pattern
+            "packet_monitoring",     # same pattern
+            "connection_limiting",   # same pattern
+            "quality_of_service",    # same pattern
+            "cos_override",          # same pattern
+            "flow_reporting",        # same pattern
+            "dpi_ssl",              # same pattern
+            "manual",               # number on Gen6, object on Gen7
+            "priority",             # same pattern
+        ]
+
         cleaned = {}
         for k, v in item.items():
             if k in keys_to_remove:
                 continue
+
+            # Strip fields where the value type doesn't match what the
+            # target gen expects (bool vs object mismatches)
+            if k in cross_gen_problematic and not isinstance(v, dict):
+                continue
+
+            # Recurse into nested dicts
             if isinstance(v, dict):
                 v = SonicWallMigrator._clean_item_for_import(v)
+                # Strip empty objects — they cause "can't be empty object" errors
+                if not v:
+                    continue
+
             cleaned[k] = v
         return cleaned
 
@@ -1294,7 +1449,8 @@ class SonicWallMigrator:
     def _import_resource(self, resource: dict, items: list) -> tuple:
         """Import a list of items for a given resource. Returns (success_count, error_count)."""
         endpoint = resource["endpoint_post"]
-        item_key = resource["item_key"]
+        key = resource["key"]            # plural: "address_objects", "zones", etc.
+        item_key = resource["item_key"]  # singular: "address_object", "zone", etc.
         sub_key = resource.get("sub_key")
         successes = 0
         errors = 0
@@ -1302,22 +1458,25 @@ class SonicWallMigrator:
         for item in items:
             cleaned = self._clean_item_for_import(item)
 
-            # Build the POST body according to SonicOS API conventions.
-            # The API expects: {"address_object": {"ipv4": {"name": ..., ...}}}
-            #
+            # Build the inner item structure.
             # If the exported item already contains the sub_key wrapper
             # (e.g., {"ipv4": {"name": ...}}) — which happens when exporting
-            # via the API — don't wrap again. If it's a flat dict (e.g., from
-            # CLI parsing), wrap it.
+            # via the API — use as-is. If it's a flat dict (e.g., from
+            # CLI parsing), wrap it with sub_key.
             if sub_key:
                 if sub_key in cleaned and isinstance(cleaned[sub_key], dict):
-                    # Already wrapped: {"ipv4": {"name": ...}} -> use as-is
-                    body = {item_key: cleaned}
+                    inner = cleaned  # Already wrapped: {"ipv4": {"name": ...}}
                 else:
-                    # Flat dict: {"name": ...} -> wrap with sub_key
-                    body = {item_key: {sub_key: cleaned}}
+                    inner = {sub_key: cleaned}  # Flat: {"name": ...} -> wrap
             else:
-                body = {item_key: cleaned}
+                inner = cleaned
+
+            # SonicOS API expects the POST body with the PLURAL key wrapping
+            # an ARRAY of items:
+            #   {"address_objects": [{"ipv4": {"name": ..., ...}}]}
+            #   {"zones": [{"name": "Office", ...}]}
+            # NOT the singular form {"address_object": {"ipv4": {...}}}
+            body = {key: [inner]}
 
             # Extract name for logging
             if sub_key and sub_key in cleaned and isinstance(cleaned[sub_key], dict):

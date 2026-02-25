@@ -235,3 +235,7 @@ curl -k -b cookies.txt -X DELETE https://<IP>:<PORT>/api/sonicos/auth \
 ## License
 
 Internal use. Provided as-is without warranty.
+
+## Warning
+
+This tool is partially tested and might not import all elements.
