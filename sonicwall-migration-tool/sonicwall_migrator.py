@@ -29,7 +29,7 @@ import sys
 import os
 import time
 
-__version__ = "1.0.0"
+__version__ = "1.3.0"
 import logging
 import argparse
 import getpass
@@ -415,10 +415,34 @@ class SonicWallAPI:
         physical = []
         vlan_map = {}  # parent_interface -> [vlan_configs]
 
+        # Track interface names we've seen to detect duplicates
+        # (Gen6 returns VLANs with same parent name repeated)
+        seen_names = {}  # name -> count
+
         for iface in interfaces:
             name = iface.get("name", "")
-            # Physical interfaces are X0, X1, X2, etc. (no colon/dot)
-            if name and not any(sep in name for sep in [":", "."]):
+            if not name:
+                continue
+
+            # Detect VLAN sub-interfaces:
+            # Method 1: Name contains separator (X4:V101, X4.V101)
+            is_vlan = any(sep in name for sep in [":", "."])
+            # Method 2: Has vlan_tag or vlan field (Gen6 API)
+            if not is_vlan:
+                vlan_tag_val = (iface.get("vlan", "") or iface.get("vlan_tag", "") or
+                                iface.get("vlan_id", ""))
+                if vlan_tag_val and str(vlan_tag_val) not in ("", "0"):
+                    is_vlan = True
+
+            if is_vlan:
+                # This is a VLAN sub-interface — handle below
+                continue
+
+            # Track for duplicate detection
+            seen_names[name] = seen_names.get(name, 0) + 1
+
+            # Only add the first occurrence as physical
+            if seen_names[name] == 1:
                 ip = (iface.get("ip", {}).get("ip", "") if isinstance(iface.get("ip"), dict)
                       else iface.get("ip", ""))
                 mask = (iface.get("ip", {}).get("mask", "") if isinstance(iface.get("ip"), dict)
@@ -435,19 +459,48 @@ class SonicWallAPI:
                     "_raw": iface,
                 })
 
-        # Map VLANs to their parent interface
-        all_vlan_items = vlans if vlans else []
-        # Also check interfaces list for VLAN sub-interfaces
+        # Collect all VLAN sub-interfaces from multiple sources
+        all_vlan_items = list(vlans) if vlans else []
+
+        # Also extract VLANs from the interfaces list
         for iface in interfaces:
             name = iface.get("name", "")
-            if any(sep in name for sep in [":", "."]):
-                all_vlan_items.append(iface)
+            # Check for VLAN indicators
+            has_separator = any(sep in name for sep in [":", "."])
+            vlan_tag_val = (iface.get("vlan", "") or iface.get("vlan_tag", "") or
+                            iface.get("vlan_id", ""))
 
+            if has_separator or (vlan_tag_val and str(vlan_tag_val) not in ("", "0")):
+                # Avoid duplicates (if already found via get_vlans)
+                if iface not in all_vlan_items:
+                    all_vlan_items.append(iface)
+
+        # Gen6 special case: if we saw duplicate interface names (e.g., X4 
+        # appearing 4 times), the extras are VLANs. Extract them by looking
+        # at the second+ occurrence and checking for different zone/IP.
+        for iface in interfaces:
+            name = iface.get("name", "")
+            if not name or any(sep in name for sep in [":", "."]):
+                continue
+            # If this name appeared multiple times, the extras might be VLANs
+            if seen_names.get(name, 0) > 1:
+                # Check if this has a different zone or IP than what we stored
+                stored = next((p for p in physical if p["name"] == name), None)
+                if stored and iface is not stored.get("_raw"):
+                    zone = iface.get("zone", "")
+                    ip_val = (iface.get("ip", {}).get("ip", "") if isinstance(iface.get("ip"), dict)
+                              else iface.get("ip", ""))
+                    if zone != stored["zone"] or ip_val != stored["ip"]:
+                        if iface not in all_vlan_items:
+                            all_vlan_items.append(iface)
+
+        # Parse VLAN items into the vlan_map structure
         for vlan in all_vlan_items:
             name = vlan.get("name", "")
-            # Parse parent interface: "X0:V10" -> parent="X0", vlan_tag=10
             parent = ""
             vlan_tag = ""
+
+            # Method 1: Parse from name (X4:V101 -> parent=X4, tag=101)
             for sep in [":", "."]:
                 if sep in name:
                     parts = name.split(sep, 1)
@@ -455,25 +508,33 @@ class SonicWallAPI:
                     vlan_tag = parts[1].replace("V", "").replace("v", "") if len(parts) > 1 else ""
                     break
 
+            # Method 2: Use explicit fields
             if not parent:
-                # Try VLAN-specific fields
-                parent = vlan.get("parent_interface", vlan.get("interface", ""))
-                vlan_tag = str(vlan.get("vlan_id", vlan.get("tag", "")))
+                parent = (vlan.get("parent_interface", "") or
+                          vlan.get("parent-interface", "") or
+                          vlan.get("interface", "") or
+                          vlan.get("name", ""))  # Gen6: name might be the parent
+                vlan_tag = str(vlan.get("vlan", "") or vlan.get("vlan_tag", "") or
+                               vlan.get("vlan_id", "") or vlan.get("vlan-tag", "") or
+                               vlan.get("tag", ""))
 
-            if parent:
+            if parent and vlan_tag:
                 if parent not in vlan_map:
                     vlan_map[parent] = []
 
                 ip = (vlan.get("ip", {}).get("ip", "") if isinstance(vlan.get("ip"), dict)
                       else vlan.get("ip", ""))
                 zone = vlan.get("zone", "")
+                mask = (vlan.get("ip", {}).get("mask", "") if isinstance(vlan.get("ip"), dict)
+                        else vlan.get("mask", "") or vlan.get("netmask", ""))
 
                 vlan_map[parent].append({
-                    "name": name,
+                    "name": f"{parent}:V{vlan_tag}" if ":" not in name and "." not in name else name,
                     "vlan_tag": vlan_tag,
                     "parent": parent,
                     "zone": zone,
                     "ip": ip,
+                    "mask": mask,
                     "comment": vlan.get("comment", ""),
                     "_raw": vlan,
                 })
@@ -759,6 +820,26 @@ DEFAULT_ZONE_NAMES = {
     "Multicast", "MULTICAST", "RADIUS",
 }
 
+# System/auto-generated address objects that should not be imported.
+# These are referenced by auto-generated NAT/route/rules.
+_SYSTEM_ADDRESS_OBJECTS = {
+    "WAN Interface IP", "LAN Interface IP", "DMZ Interface IP",
+    "All Interface IP", "All WAN IP",
+    "MGMT IP", "MGMT Subnet", "MGMT Default Gateway",
+    "WLAN RemoteAccess Networks", "WAN RemoteAccess Networks",
+    "Default Gateway", "Default Active WAN IP",
+    "Firewalled Subnets", "LAN Subnets", "WAN Subnets", "DMZ Subnets",
+}
+
+# Strings in NAT/access rules that indicate system-generated rules
+# referencing objects that don't exist on the target
+_SYSTEM_RULE_REFS = {
+    "WLAN RemoteAccess Networks",
+    "All MGMT Management IP",
+    "MGMT Management IPv6 Addresses",
+    "MGMT IPv6 Primary Static Address",
+}
+
 
 # ============================================================================
 # Migration Engine
@@ -802,6 +883,49 @@ class SonicWallMigrator:
                     item.get("mac", {}).get("name", "") or "")
 
         if not name:
+            # For NAT/route/access rules, name is often empty — check
+            # the nested ipv4/ipv6 dict for system indicators instead
+            inner = item.get("ipv4", item.get("ipv6", {}))
+            if isinstance(inner, dict):
+                comment = inner.get("comment", "").lower()
+
+                # Auto-generated NAT policies
+                if "NAT" in resource_name:
+                    if any(kw in comment for kw in [
+                        "management nat", "ike nat", "auto added", "auto-added"
+                    ]):
+                        return True
+                    # NATs bound to MGMT interface (NSv doesn't have MGMT)
+                    inbound = inner.get("inbound", "")
+                    outbound = inner.get("outbound", "")
+                    if inbound == "MGMT" or outbound == "MGMT":
+                        return True
+
+                # Auto-generated route policies (interface-specific system routes)
+                if "Route" in resource_name:
+                    dest = inner.get("destination", {})
+                    dest_name = dest.get("name", "") if isinstance(dest, dict) else ""
+                    iface = inner.get("interface", "")
+                    # Routes to MGMT interface
+                    if iface == "MGMT":
+                        return True
+                    # Auto-generated routes: interface-specific subnet routes
+                    # like "X0 Subnet", "X4:V101 Subnet" are auto-created
+                    # when the interface is configured
+                    import re
+                    if dest_name and re.match(
+                        r'^(X\d+|U\d+|MGMT|X\d+:V\d+)\s+Subnet$', dest_name
+                    ):
+                        return True
+
+                # Access rules referencing system-only objects
+                if "Access" in resource_name:
+                    rule_str = json.dumps(inner)
+                    for sys_obj in _SYSTEM_RULE_REFS:
+                        if sys_obj in rule_str:
+                            return True
+
+        if not name:
             return False
 
         # Zone defaults — skip built-in zones
@@ -817,13 +941,8 @@ class SonicWallMigrator:
             return True
 
         # ----- Auto-generated interface address objects -----
-        # These are created automatically per-interface (X0 IP, X0 Subnet,
-        # X1 Default Gateway, etc.) and are read-only on the target.
-        # They'll be regenerated when interfaces are configured.
         if "Address" in resource_name:
             import re
-            # Match patterns like: X0 IP, X1 Subnet, X2 Default Gateway,
-            # MGMT IP, U0 IP, X0 IPv6 Link-Local Address, etc.
             iface_pattern = re.compile(
                 r'^(X\d+|U\d+|MGMT|X\d+:V\d+)\s+'
                 r'(IP|Subnet|Default Gateway|IPv6|SonicPoints).*$'
@@ -831,7 +950,6 @@ class SonicWallMigrator:
             if iface_pattern.match(name):
                 return True
 
-            # System-generated aggregate objects
             system_names = {
                 "Default Gateway", "Default Active WAN IP",
                 "Dial-Up Default Gateway", "MGMT Default Gateway",
@@ -846,21 +964,17 @@ class SonicWallMigrator:
             if name in system_names:
                 return True
 
-            # Patterns: "All X0 Management IP", "Office Subnets", etc.
             if name.startswith("All ") and ("Management IP" in name or
                                              "Management IPv6" in name or
                                              "Interface" in name):
                 return True
 
-            # Zone-derived auto objects: "<ZoneName> Subnets", "<ZoneName> Interface IP"
             if name.endswith(" Subnets") or name.endswith(" Interface IP"):
                 return True
 
-            # IPv6 per-interface groups
             if "IPv6 Addresses" in name:
                 return True
 
-            # SSO/RADIUS system groups
             system_groups = {
                 "Firewall SSO Agents", "RADIUS Accounting Clients",
                 "Firewall Terminal Services Agents",
@@ -868,6 +982,38 @@ class SonicWallMigrator:
             }
             if name in system_groups:
                 return True
+
+        # ----- Built-in service groups (ICMP, ICMPv6, etc.) -----
+        if "Service Group" in resource_name:
+            builtin_service_groups = {
+                "ICMP", "ICMPv6",
+                "Destination Unreachable Group", "Redirect Group",
+                "Time Exceeded Group", "Parameter Problem Group",
+                "Destination Unreachable (IPv6) Group",
+                "Time Exceeded (IPv6) Group",
+                "Parameter Problem (IPv6) Group",
+                "Router Renumbering (IPv6) Group",
+                "ICMP Node Information Query (IPv6) Group",
+                "ICMP Node Information Response (IPv6) Group",
+            }
+            if name in builtin_service_groups:
+                return True
+
+        # ----- ICMPv6 service objects with Gen6-only subtypes -----
+        if "Service Object" in resource_name:
+            inner = item.get("ipv4", item.get("ipv6", item))
+            if isinstance(inner, dict):
+                icmpv6_val = inner.get("icmpv6", {})
+                if icmpv6_val:
+                    # Gen6 exports some ICMPv6 subtypes with type="none" that
+                    # Gen7 rejects. Valid types have an actual type string.
+                    icmpv6_type = ""
+                    if isinstance(icmpv6_val, dict):
+                        icmpv6_type = icmpv6_val.get("type", "")
+                    elif isinstance(icmpv6_val, str):
+                        icmpv6_type = icmpv6_val
+                    if icmpv6_type == "none" or icmpv6_type == "":
+                        return True
 
         return False
 
@@ -901,6 +1047,16 @@ class SonicWallMigrator:
             "priority",             # same pattern
         ]
 
+        # Interface-specific fields that Gen7 doesn't accept from Gen6
+        interface_strip_fields = [
+            "link_speed", "link-speed", "speed",
+            "duplex", "mtu", "mac_address",
+            "auto_negotiate", "auto-negotiate",
+            "routed_mode", "routed-mode",
+            "shutdown", "cos_8021p",
+            "bandwidth_management", "bandwidth-management",
+        ]
+
         cleaned = {}
         for k, v in item.items():
             if k in keys_to_remove:
@@ -909,6 +1065,14 @@ class SonicWallMigrator:
             # Strip fields where the value type doesn't match what the
             # target gen expects (bool vs object mismatches)
             if k in cross_gen_problematic and not isinstance(v, dict):
+                continue
+
+            # Strip interface-specific fields that Gen7 rejects from Gen6
+            if k in interface_strip_fields:
+                continue
+
+            # Strip string values like "auto-negotiate" that Gen7 doesn't accept
+            if isinstance(v, str) and v in ("auto-negotiate", "auto negotiate"):
                 continue
 
             # Recurse into nested dicts
@@ -993,18 +1157,22 @@ class SonicWallMigrator:
 
     def select_interfaces_interactive(self, comparison: dict) -> dict:
         """
-        Interactive interface/VLAN selection when source has more interfaces
-        than target. X0 is always excluded for safety (must be configured
-        manually when the new firewall goes live).
-        Returns a mapping dict:
+        Interactive interface/VLAN selection with mapping.
+        
+        Rules:
+        - X0 is always excluded (safety - must be configured manually)
+        - MGMT is auto-mapped if it exists on both sides
+        - When target has fewer interfaces than source, prompt for mapping
+        - When target has same/more, offer 1:1 mapping selection
+        - Only mapped interfaces and their VLANs will be imported
+        
+        Returns:
         {
             "interfaces": [list of source interface configs to migrate],
-            "vlans": [list of source VLAN configs to migrate],
-            "mapping": {"X2": "X2", "X3": "X1", ...}  (source->target)
+            "vlans": [list of VLAN dicts with _target_parent set],
+            "mapping": {"X2": "X2", "X3": "X1", ...}
         }
         """
-        # X0 is always excluded — it's the primary LAN/management interface
-        # and must be configured manually when the target goes into production.
         EXCLUDED_INTERFACES = {"X0"}
 
         src_summary = comparison["source"]
@@ -1018,10 +1186,9 @@ class SonicWallMigrator:
         src_phys_filtered = [i for i in src_phys if i["name"] not in EXCLUDED_INTERFACES]
         x0_vlans = len(src_vlans.get("X0", []))
         if x0_vlans:
-            logger.info(f"    X0 has {x0_vlans} VLANs — these are also excluded.")
-            logger.info(f"    You must recreate X0 VLANs manually on the target.")
+            logger.info(f"    NOTE: X0 has {x0_vlans} VLANs that must be recreated manually.")
 
-        # Also exclude X0 from available target list (don't let anyone map TO X0)
+        # Filter out X0 from available targets
         tgt_names_available = [n for n in tgt_names if n not in EXCLUDED_INTERFACES]
 
         result = {
@@ -1030,47 +1197,55 @@ class SonicWallMigrator:
             "mapping": {},
         }
 
-        # Recalculate whether source has more (excluding X0 on both sides)
-        tgt_phys_count = len([i for i in tgt_phys if i["name"] not in EXCLUDED_INTERFACES])
-        source_has_more = len(src_phys_filtered) > tgt_phys_count
+        # --- Auto-map MGMT interface (no prompt needed) ---
+        src_has_mgmt = any(i["name"] == "MGMT" for i in src_phys_filtered)
+        tgt_has_mgmt = "MGMT" in tgt_names_available
+        if src_has_mgmt and tgt_has_mgmt:
+            mgmt_iface = next(i for i in src_phys_filtered if i["name"] == "MGMT")
+            result["mapping"]["MGMT"] = "MGMT"
+            result["interfaces"].append(mgmt_iface)
+            tgt_names_available.remove("MGMT")
+            src_phys_filtered = [i for i in src_phys_filtered if i["name"] != "MGMT"]
+            logger.info("    Auto-mapped: MGMT -> MGMT")
+            for vlan in src_vlans.get("MGMT", []):
+                vlan["_target_parent"] = "MGMT"
+                result["vlans"].append(vlan)
 
-        if source_has_more:
-            print(f"\n{'!' * 70}")
-            print(f"  SOURCE has MORE interfaces ({len(src_phys_filtered)} excl. X0) "
-                  f"than TARGET ({tgt_phys_count} excl. X0).")
-            print(f"  You must select which source interfaces to migrate")
-            print(f"  and map them to available target interfaces.")
-            print(f"{'!' * 70}")
+        if not src_phys_filtered:
+            logger.info("    No additional interfaces to map (only X0/MGMT).")
+            return result
 
-            print(f"\n  Available TARGET interfaces (excl. X0): "
-                  f"{', '.join(tgt_names_available)}")
-            print()
+        # Determine mapping approach based on interface counts
+        if len(src_phys_filtered) > len(tgt_names_available):
+            # Target has fewer interfaces - MUST map selectively
+            print(f"\n  SOURCE has {len(src_phys_filtered)} interfaces (excl. X0/MGMT)")
+            print(f"  TARGET has {len(tgt_names_available)} available interfaces")
+            print("  You must map source interfaces to available target interfaces.\n")
 
-            # Let user select and map each source interface
-            print("  For each source interface, select the target interface to map to.")
-            print("  Enter 'skip' to skip an interface, or 'done' when finished.\n")
+            print("  Source interfaces:")
+            for i, iface in enumerate(src_phys_filtered, 1):
+                vlan_count = len(src_vlans.get(iface["name"], []))
+                vlan_str = f" + {vlan_count} VLANs" if vlan_count else ""
+                ip_str = f" [{iface['ip']}]" if iface.get("ip") else ""
+                zone_str = f" (Zone: {iface['zone']})" if iface.get("zone") else ""
+                print(f"    {i}. {iface['name']}{zone_str}{ip_str}{vlan_str}")
+
+            print(f"\n  Available target interfaces: {', '.join(tgt_names_available)}")
+            print("  Type 'done' when finished mapping.\n")
 
             used_targets = set()
-
             for src_iface in src_phys_filtered:
                 src_name = src_iface["name"]
-                vlan_count = len(src_vlans.get(src_name, []))
-                vlan_str = f" + {vlan_count} VLANs" if vlan_count else ""
-                ip_str = f" [{src_iface['ip']}]" if src_iface.get("ip") else ""
-                zone_str = f" (Zone: {src_iface['zone']})" if src_iface.get("zone") else ""
-
-                available = [t for t in tgt_names_available if t not in used_targets]
+                available = [n for n in tgt_names_available if n not in used_targets]
                 if not available:
-                    logger.warning(f"    No more target interfaces available. "
-                                   f"Skipping {src_name} and remaining.")
-                    break
+                    logger.warning(f"    No more target interfaces available - skipping {src_name}")
+                    continue
 
-                print(f"  Source: {src_name}{zone_str}{ip_str}{vlan_str}")
-                print(f"    Available targets: {', '.join(available)}")
-                choice = input(f"    Map {src_name} to [skip]: ").strip()
+                choice = input(
+                    f"  Map {src_name} -> [{'/'.join(available)}/skip/done]: "
+                ).strip()
 
-                if choice.lower() in ("skip", "s", ""):
-                    logger.info(f"    Skipping interface {src_name}")
+                if choice.lower() == "skip":
                     continue
                 elif choice.lower() == "done":
                     break
@@ -1079,43 +1254,14 @@ class SonicWallMigrator:
                     result["interfaces"].append(src_iface)
                     used_targets.add(choice)
                     logger.info(f"    Mapped: {src_name} -> {choice}")
-
-                    # Include VLANs for this interface
-                    iface_vlans = src_vlans.get(src_name, [])
-                    if iface_vlans:
-                        print(f"\n    VLANs on {src_name}:")
-                        for i, vlan in enumerate(iface_vlans, 1):
-                            vz = f" Zone: {vlan['zone']}" if vlan.get("zone") else ""
-                            vi = f" [{vlan['ip']}]" if vlan.get("ip") else ""
-                            print(f"      {i}. {vlan['name']}{vz}{vi}")
-
-                        vlan_choice = input(
-                            f"    Migrate VLANs? [all/none/comma-separated numbers]: "
-                        ).strip().lower()
-
-                        if vlan_choice in ("all", "a", ""):
-                            for vlan in iface_vlans:
-                                vlan["_target_parent"] = choice
-                            result["vlans"].extend(iface_vlans)
-                            logger.info(f"    Including all {len(iface_vlans)} VLANs")
-                        elif vlan_choice not in ("none", "n"):
-                            try:
-                                indices = [int(x.strip()) for x in vlan_choice.split(",")]
-                                for idx in indices:
-                                    if 1 <= idx <= len(iface_vlans):
-                                        vlan = iface_vlans[idx - 1]
-                                        vlan["_target_parent"] = choice
-                                        result["vlans"].append(vlan)
-                                logger.info(f"    Including {len(indices)} selected VLANs")
-                            except ValueError:
-                                logger.warning("    Invalid selection — skipping VLANs")
+                    self._select_vlans_for_interface(src_name, choice, src_vlans, result)
                     print()
                 else:
-                    logger.warning(f"    Invalid target '{choice}' — skipping {src_name}")
+                    logger.warning(f"    Invalid target '{choice}' - skipping {src_name}")
 
         else:
-            # Target has same or more interfaces — straightforward 1:1 mapping
-            print("\n  Interfaces are compatible (target has enough ports, excl. X0).")
+            # Target has same or more interfaces - 1:1 mapping
+            print(f"\n  Interfaces are compatible (target has enough ports, excl. X0/MGMT).")
             print("  Select which source interfaces to migrate:\n")
 
             for i, src_iface in enumerate(src_phys_filtered, 1):
@@ -1138,30 +1284,25 @@ class SonicWallMigrator:
                 try:
                     selected_ifaces = [int(x.strip()) - 1 for x in selection.split(",")]
                 except ValueError:
-                    logger.warning("Invalid selection — skipping interfaces.")
+                    logger.warning("Invalid selection - skipping interfaces.")
 
             for idx in selected_ifaces:
                 if 0 <= idx < len(src_phys_filtered):
                     src_iface = src_phys_filtered[idx]
                     src_name = src_iface["name"]
-                    # Map to same interface name on target (1:1)
                     if src_name in tgt_names_available:
                         result["mapping"][src_name] = src_name
                         result["interfaces"].append(src_iface)
-                        # Include all VLANs for selected interfaces
                         iface_vlans = src_vlans.get(src_name, [])
                         for vlan in iface_vlans:
                             vlan["_target_parent"] = src_name
                         result["vlans"].extend(iface_vlans)
                     else:
-                        logger.warning(
-                            f"    {src_name} not available on target — skipping"
-                        )
+                        logger.warning(f"    {src_name} not available on target - skipping")
 
         # Summary
         logger.info("")
-        logger.info("  Interface migration plan:")
-        logger.info("    X0: EXCLUDED (configure manually when firewall goes live)")
+        logger.info("  Interface mapping plan:")
         if result["interfaces"]:
             for src_name, tgt_name in result["mapping"].items():
                 arrow = f"{src_name} -> {tgt_name}"
@@ -1174,10 +1315,63 @@ class SonicWallMigrator:
 
         return result
 
+    def _select_vlans_for_interface(self, src_name, tgt_name, src_vlans, result):
+        """Helper: prompt user to select VLANs for a mapped interface."""
+        iface_vlans = src_vlans.get(src_name, [])
+        if not iface_vlans:
+            return
+
+        print(f"\n    VLANs on {src_name}:")
+        for i, vlan in enumerate(iface_vlans, 1):
+            vz = f" Zone: {vlan['zone']}" if vlan.get("zone") else ""
+            vi = f" [{vlan['ip']}]" if vlan.get("ip") else ""
+            vt = f" (tag {vlan['vlan_tag']})" if vlan.get("vlan_tag") else ""
+            print(f"      {i}. {vlan['name']}{vt}{vz}{vi}")
+
+        vlan_choice = input(
+            f"    Migrate VLANs? [all/none/comma-separated numbers]: "
+        ).strip().lower()
+
+        if vlan_choice in ("all", "a", ""):
+            for vlan in iface_vlans:
+                vlan["_target_parent"] = tgt_name
+            result["vlans"].extend(iface_vlans)
+            logger.info(f"    Including all {len(iface_vlans)} VLANs")
+        elif vlan_choice not in ("none", "n"):
+            try:
+                indices = [int(x.strip()) for x in vlan_choice.split(",")]
+                count = 0
+                for idx in indices:
+                    if 1 <= idx <= len(iface_vlans):
+                        vlan = iface_vlans[idx - 1]
+                        vlan["_target_parent"] = tgt_name
+                        result["vlans"].append(vlan)
+                        count += 1
+                logger.info(f"    Including {count} selected VLANs")
+            except ValueError:
+                logger.warning("    Invalid selection - skipping VLANs")
+
     def migrate_interfaces(self, interface_plan: dict):
         """
         Apply the interface migration plan to the target firewall.
         Configures interface IP settings, zones, and VLAN sub-interfaces.
+        
+        VLAN sub-interfaces are created using the SonicOS API format:
+        POST /api/sonicos/interfaces/vlan
+        {
+          "interfaces": [{
+            "vlan": {
+              "name": "X0.V100",
+              "parent-interface": "X0",
+              "vlan-tag": 100,
+              "zone": "LAN",
+              "mode": "static",
+              "ip-address": "172.16.100.1",
+              "subnet-mask": "255.255.255.0",
+              "comment": "VLAN 100 Sub-interface"
+            }
+          }]
+        }
         """
         if not interface_plan["interfaces"] and not interface_plan["vlans"]:
             logger.info("  No interfaces to migrate.")
@@ -1205,8 +1399,8 @@ class SonicWallMigrator:
                 cleaned["name"] = tgt_name
                 logger.info(f"    Remapping {src_name} -> {tgt_name}")
 
-            # Build PUT body (interfaces are updated, not created)
-            body = {"interface": {"ipv4": cleaned}}
+            # Build PUT body — physical interfaces already exist, use PUT
+            body = {"interfaces": [{"ipv4": cleaned}]}
 
             item_label = (f"{src_name}->{tgt_name}" if src_name != tgt_name
                           else tgt_name)
@@ -1217,7 +1411,7 @@ class SonicWallMigrator:
                 continue
 
             # Use PUT since interfaces already exist on the target
-            ok, resp = self.target._put(f"interfaces/ipv4", body)
+            ok, resp = self.target._put("interfaces/ipv4", body)
             if ok:
                 successes += 1
                 logger.info(f"    Configured: {item_label}")
@@ -1241,55 +1435,124 @@ class SonicWallMigrator:
         for vlan in interface_plan["vlans"]:
             tgt_parent = vlan.get("_target_parent", "")
             raw = vlan.get("_raw", vlan)
-            cleaned = self._clean_item_for_import(raw)
 
-            # Remap parent interface in VLAN name if needed
-            src_parent = vlan.get("parent", "")
-            if src_parent and tgt_parent and src_parent != tgt_parent:
-                old_name = cleaned.get("name", "")
-                new_name = old_name.replace(src_parent, tgt_parent)
-                cleaned["name"] = new_name
-                if "parent_interface" in cleaned:
-                    cleaned["parent_interface"] = tgt_parent
-                if "interface" in cleaned:
-                    cleaned["interface"] = tgt_parent
-                logger.info(f"    Remapping VLAN: {old_name} -> {new_name}")
+            # Build proper VLAN sub-interface creation payload.
+            # Extract the VLAN tag from the name (e.g., "X4:V101" -> 101)
+            vlan_tag = vlan.get("vlan_tag", "")
+            if not vlan_tag:
+                # Try to parse from name
+                name = vlan.get("name", "")
+                for sep in [":V", ":v", ".V", ".v"]:
+                    if sep in name:
+                        try:
+                            vlan_tag = int(name.split(sep, 1)[1])
+                        except (ValueError, IndexError):
+                            pass
+                        break
 
-            vlan_name = cleaned.get("name", str(vlan.get("vlan_tag", "unknown")))
+            if not vlan_tag:
+                vlan_errors += 1
+                logger.warning(f"    FAILED VLAN: {vlan.get('name', '?')} — could not determine VLAN tag")
+                continue
 
-            # Try POST first (create), fall back to PUT (update)
-            body = {"interface": {"ipv4": cleaned}}
+            # Build the VLAN sub-interface in the correct SonicOS format
+            vlan_config = {
+                "parent-interface": tgt_parent,
+                "vlan-tag": int(vlan_tag),
+            }
+
+            # Add zone if available
+            zone = vlan.get("zone", "") or raw.get("zone", "")
+            if zone:
+                vlan_config["zone"] = zone
+
+            # Add IP configuration
+            ip_addr = vlan.get("ip", "")
+            if not ip_addr and isinstance(raw.get("ip"), dict):
+                ip_addr = raw["ip"].get("ip", "")
+            elif not ip_addr:
+                ip_addr = raw.get("ip-address", "") or raw.get("ip_address", "")
+
+            subnet = (raw.get("netmask", "") or raw.get("subnet-mask", "") or
+                      raw.get("mask", "") or raw.get("subnet_mask", ""))
+            if not subnet and isinstance(raw.get("ip"), dict):
+                subnet = raw["ip"].get("netmask", "") or raw["ip"].get("mask", "")
+
+            if ip_addr and subnet:
+                vlan_config["mode"] = "static"
+                vlan_config["ip-address"] = ip_addr
+                vlan_config["subnet-mask"] = subnet
+
+            # Add comment if present
+            comment = raw.get("comment", "") or vlan.get("comment", "")
+            if comment:
+                vlan_config["comment"] = comment
+
+            # Add management settings if present
+            mgmt = raw.get("management", {})
+            if mgmt:
+                vlan_config["management"] = mgmt
+
+            # Generate a display name
+            vlan_display = f"{tgt_parent}:V{vlan_tag}"
+
+            # Build POST body in the SonicOS array format
+            body = {"interfaces": [{"vlan": vlan_config}]}
 
             if self.dry_run:
-                logger.info(f"    [DRY RUN] Would create VLAN: {vlan_name}")
+                zone_str = f" zone={zone}" if zone else ""
+                ip_str = f" {ip_addr}/{subnet}" if ip_addr else ""
+                logger.info(f"    [DRY RUN] Would create VLAN: {vlan_display}{zone_str}{ip_str}")
                 vlan_successes += 1
                 continue
 
-            ok, resp = self.target._post("interfaces/ipv4", body)
+            logger.debug(f"    VLAN POST body: {json.dumps(body)}")
+
+            ok, resp = self.target._post("interfaces/vlan", body)
             if ok:
                 vlan_successes += 1
-                logger.info(f"    Created VLAN: {vlan_name}")
+                logger.info(f"    Created VLAN: {vlan_display}")
             else:
-                # Try PUT if it already exists
-                ok2, resp2 = self.target._put("interfaces/ipv4", body)
-                if ok2:
-                    vlan_successes += 1
-                    logger.info(f"    Updated VLAN: {vlan_name}")
-                else:
-                    vlan_errors += 1
-                    msg = ""
-                    status = resp2.get("status", {})
-                    for info in status.get("info", []):
-                        msg += info.get("message", "")
-                    logger.warning(f"    FAILED VLAN: {vlan_name} — {msg}")
+                # Try alternative body formats for different SonicOS versions
+                # Gen7 may want singular "interface" key or different endpoint
+                alt_bodies = [
+                    ("interfaces/vlan", {"interface": {"vlan": vlan_config}}),
+                    ("interfaces/ipv4", {"interfaces": [{"vlan": vlan_config}]}),
+                    ("interfaces/ipv4", {"interface": {"vlan": vlan_config}}),
+                ]
+                created = False
+                for alt_ep, alt_body in alt_bodies:
+                    ok2, resp2 = self.target._post(alt_ep, alt_body)
+                    if ok2:
+                        vlan_successes += 1
+                        logger.info(f"    Created VLAN: {vlan_display}")
+                        created = True
+                        break
+
+                if not created:
+                    # Try PUT as last resort (update existing)
+                    ok3, resp3 = self.target._put("interfaces/vlan", body)
+                    if ok3:
+                        vlan_successes += 1
+                        logger.info(f"    Updated VLAN: {vlan_display}")
+                    else:
+                        vlan_errors += 1
+                        # Log the most informative error
+                        msg = ""
+                        for r in [resp, resp3]:
+                            if r:
+                                status = r.get("status", {})
+                                for info in status.get("info", []):
+                                    m = info.get("message", "")
+                                    if m and m not in msg:
+                                        msg += m + " | "
+                        logger.warning(f"    FAILED VLAN: {vlan_display} — {msg.rstrip(' | ')}")
 
         if vlan_successes > 0 and not self.dry_run:
             self.target.commit()
             time.sleep(1)
 
         # Update stats
-        total_s = successes + vlan_successes
-        total_e = errors + vlan_errors
         self.stats["imported"]["Interfaces"] = successes
         self.stats["imported"]["VLANs"] = vlan_successes
         self.stats["errors"]["Interfaces"] = errors
@@ -1873,10 +2136,37 @@ Config JSON format:
             logger.info(f"Your export is saved at: {backup_file}")
             return
 
-        # Migrate interfaces first (before other resources that depend on them)
-        if interface_plan and interface_plan["interfaces"]:
+        # --- MIGRATION ORDER ---
+        # 1. Import Zones first (interfaces/VLANs reference custom zones)
+        # 2. Migrate interfaces & VLANs (address objects/rules reference them)
+        # 3. Import all remaining config (objects, services, NAT, rules)
+
+        # Step 1: Import zones early so interfaces can reference them
+        zone_resource = next(
+            (r for r in MIGRATION_RESOURCES if r["name"] == "Zones"), None
+        )
+        if zone_resource and "Zones" in config and config["Zones"]:
+            logger.info("  Pre-importing Zones (needed for interface migration)...")
+            zone_items = config["Zones"]
+            success, errors = migrator._import_resource(zone_resource, zone_items)
+            migrator.stats["imported"]["Zones"] = success
+            migrator.stats["errors"]["Zones"] = errors
+            migrator.stats["exported"]["Zones"] = len(zone_items)
+            if success > 0:
+                migrator.target.commit()
+                time.sleep(1)
+            if errors:
+                logger.warning(f"    => {success} zones ok, {errors} failed")
+            else:
+                logger.info(f"    => {success} zones imported")
+            # Mark zones as done so import_all skips them
+            migrator.skip_resources.append("Zones")
+
+        # Step 2: Migrate interfaces & VLANs
+        if interface_plan and (interface_plan["interfaces"] or interface_plan["vlans"]):
             migrator.migrate_interfaces(interface_plan)
 
+        # Step 3: Import all remaining config
         migrator.import_all(config)
         migrator.print_summary()
 
