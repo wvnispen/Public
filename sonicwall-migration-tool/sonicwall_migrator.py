@@ -29,7 +29,7 @@ import sys
 import os
 import time
 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 import logging
 import argparse
 import getpass
@@ -412,6 +412,24 @@ class SonicWallAPI:
         interfaces = self.get_interfaces()
         vlans = self.get_vlans()
 
+        # DEBUG: Dump all interfaces with duplicate names to understand Gen6 VLAN format
+        name_counts = {}
+        for iface in interfaces:
+            n = iface.get("name", "")
+            name_counts[n] = name_counts.get(n, 0) + 1
+        for dup_name, count in name_counts.items():
+            if count > 1:
+                logger.info(f"  [GEN6-RAW] Interface '{dup_name}' appears {count} times:")
+                for idx, iface in enumerate(interfaces):
+                    if iface.get("name", "") == dup_name:
+                        # Truncate large fields for readability
+                        display = {}
+                        for k, v in iface.items():
+                            if k.startswith("_"):
+                                continue
+                            display[k] = v
+                        logger.info(f"    [{idx}] {json.dumps(display, default=str)[:500]}")
+
         physical = []
         vlan_map = {}  # parent_interface -> [vlan_configs]
 
@@ -474,6 +492,10 @@ class SonicWallAPI:
                 # Avoid duplicates (if already found via get_vlans)
                 if iface not in all_vlan_items:
                     all_vlan_items.append(iface)
+                    # Dump raw data for diagnostics
+                    display = {k: v for k, v in iface.items() if not k.startswith("_")}
+                    logger.info(f"    [GEN6-VLAN] Found via {'name' if has_separator else 'vlan field'}: "
+                                f"{json.dumps(display, default=str)}")
 
         # Gen6 special case: if we saw duplicate interface names (e.g., X4 
         # appearing 4 times), the extras are VLANs. Extract them by looking
@@ -490,9 +512,17 @@ class SonicWallAPI:
                     zone = iface.get("zone", "")
                     ip_val = (iface.get("ip", {}).get("ip", "") if isinstance(iface.get("ip"), dict)
                               else iface.get("ip", ""))
-                    if zone != stored["zone"] or ip_val != stored["ip"]:
+                    vlan_field = iface.get("vlan", "")
+                    logger.info(f"    [VLAN-DETECT] Duplicate '{name}': "
+                                f"zone={zone!r} ip={ip_val!r} vlan={vlan_field!r} "
+                                f"stored_zone={stored['zone']!r} stored_ip={stored['ip']!r}")
+                    logger.info(f"    [VLAN-DETECT]   Raw keys: {sorted(iface.keys())}")
+                    # Accept as VLAN if: different zone/IP OR has a vlan field
+                    if (zone != stored["zone"] or ip_val != stored["ip"] or
+                            (vlan_field and str(vlan_field) not in ("", "0"))):
                         if iface not in all_vlan_items:
                             all_vlan_items.append(iface)
+                            logger.info(f"    [VLAN-DETECT]   => Added as VLAN")
 
         # Parse VLAN items into the vlan_map structure
         for vlan in all_vlan_items:
@@ -546,6 +576,12 @@ class SonicWallAPI:
                 })
 
         total_vlans = sum(len(v) for v in vlan_map.values())
+
+        # Log VLAN summary for diagnostics
+        for parent, vlans_list in vlan_map.items():
+            for v in vlans_list:
+                logger.info(f"    [VLAN-MAP] {v['name']}: zone={v['zone']!r} "
+                            f"ip={v['ip']!r} mask={v['mask']!r} tag={v['vlan_tag']!r}")
 
         return {
             "physical": sorted(physical, key=lambda x: x["name"]),
@@ -898,7 +934,8 @@ class SonicWallMigrator:
                 # Auto-generated NAT policies
                 if "NAT" in resource_name:
                     if any(kw in comment for kw in [
-                        "management nat", "ike nat", "auto added", "auto-added"
+                        "management nat", "ike nat", "auto added", "auto-added",
+                        "default nat policy",
                     ]):
                         return True
                     # NATs bound to MGMT interface (NSv doesn't have MGMT)
@@ -1474,6 +1511,12 @@ class SonicWallMigrator:
             vlan_tag = int(vlan_tag)
 
             # Extract zone, IP, and mask from the vlan dict and _raw
+            # Log the raw data for diagnostics (VLAN config issues are common)
+            logger.info(f"    VLAN {vlan.get('name', '?')}: vlan_dict keys={list(vlan.keys())}")
+            logger.info(f"      zone={vlan.get('zone', '')!r}, ip={vlan.get('ip', '')!r}, mask={vlan.get('mask', '')!r}")
+            logger.info(f"      _raw keys={list(raw.keys()) if isinstance(raw, dict) else 'N/A'}")
+            logger.info(f"      _raw zone={raw.get('zone', '')!r}, ip={raw.get('ip', '')!r}")
+
             zone = vlan.get("zone", "") or raw.get("zone", "")
             ip_addr = vlan.get("ip", "")
             if not ip_addr and isinstance(raw.get("ip"), dict):
@@ -1491,6 +1534,7 @@ class SonicWallMigrator:
             mgmt = raw.get("management", {})
 
             vlan_display = f"{tgt_parent}:V{vlan_tag}"
+            logger.info(f"      => Extracted: zone={zone!r}, ip={ip_addr!r}, mask={subnet!r}")
 
             if self.dry_run:
                 zone_str = f" zone={zone}" if zone else ""
@@ -1525,12 +1569,35 @@ class SonicWallMigrator:
             # Primary format: POST interfaces/ipv4 with ipv4 wrapper
             body_primary = {"interfaces": [{"ipv4": vlan_ipv4}]}
 
-            logger.debug(f"    VLAN POST body: {json.dumps(body_primary)}")
+            logger.info(f"    VLAN POST body: {json.dumps(body_primary)}")
 
             ok, resp = self.target._post("interfaces/ipv4", body_primary)
             if ok:
                 vlan_successes += 1
                 logger.info(f"    Created VLAN: {vlan_display}")
+                # After creation, configure zone/IP via PUT if we have data
+                if zone or ip_addr:
+                    put_ep = f"interfaces/ipv4/name/{tgt_parent}/vlan/{vlan_tag}"
+                    put_body = {"interface": {"ipv4": {}}}
+                    if zone:
+                        put_body["interface"]["ipv4"]["zone"] = zone
+                    if ip_addr and subnet:
+                        put_body["interface"]["ipv4"]["ip_assignment"] = "static"
+                        put_body["interface"]["ipv4"]["ip"] = {"ip": ip_addr, "netmask": subnet}
+                    if comment:
+                        put_body["interface"]["ipv4"]["comment"] = comment
+                    if mgmt and isinstance(mgmt, dict) and any(v is True for v in mgmt.values()):
+                        put_body["interface"]["ipv4"]["management"] = mgmt
+                    logger.info(f"    Configuring {vlan_display}: zone={zone}, ip={ip_addr}/{subnet}")
+                    ok_put, resp_put = self.target._put(put_ep, put_body)
+                    if ok_put:
+                        logger.info(f"    Configured {vlan_display} settings")
+                    else:
+                        msg = ""
+                        if resp_put and isinstance(resp_put, dict):
+                            for info in resp_put.get("status", {}).get("info", []):
+                                msg += info.get("message", "") + " "
+                        logger.warning(f"    WARNING: VLAN {vlan_display} created but settings failed: {msg.strip()}")
                 continue
 
             # Try alternative body formats
