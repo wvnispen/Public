@@ -29,7 +29,7 @@ import sys
 import os
 import time
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 import logging
 import argparse
 import getpass
@@ -525,8 +525,14 @@ class SonicWallAPI:
                 ip = (vlan.get("ip", {}).get("ip", "") if isinstance(vlan.get("ip"), dict)
                       else vlan.get("ip", ""))
                 zone = vlan.get("zone", "")
-                mask = (vlan.get("ip", {}).get("mask", "") if isinstance(vlan.get("ip"), dict)
-                        else vlan.get("mask", "") or vlan.get("netmask", ""))
+                mask = ""
+                if isinstance(vlan.get("ip"), dict):
+                    mask = (vlan["ip"].get("mask", "") or
+                            vlan["ip"].get("netmask", "") or
+                            vlan["ip"].get("subnet_mask", ""))
+                if not mask:
+                    mask = (vlan.get("mask", "") or vlan.get("netmask", "") or
+                            vlan.get("subnet_mask", "") or vlan.get("subnet-mask", ""))
 
                 vlan_map[parent].append({
                     "name": f"{parent}:V{vlan_tag}" if ":" not in name and "." not in name else name,
@@ -900,6 +906,18 @@ class SonicWallMigrator:
                     outbound = inner.get("outbound", "")
                     if inbound == "MGMT" or outbound == "MGMT":
                         return True
+                    # SSL VPN NATs referencing zone-specific Interface IP groups
+                    # (e.g. "Office Interface IP", "guest Interface IPv6 Addresses")
+                    # — these are auto-created when zones are assigned to interfaces
+                    if "ssl vpn" in comment:
+                        for field in ["source", "destination",
+                                      "translated_source", "translated_destination"]:
+                            ref = inner.get(field, {})
+                            if isinstance(ref, dict):
+                                ref_name = ref.get("name", "") or ref.get("group", "")
+                                if (ref_name.endswith(" Interface IP") or
+                                        ref_name.endswith(" Interface IPv6 Addresses")):
+                                    return True
 
                 # Auto-generated route policies (interface-specific system routes)
                 if "Route" in resource_name:
@@ -1436,11 +1454,9 @@ class SonicWallMigrator:
             tgt_parent = vlan.get("_target_parent", "")
             raw = vlan.get("_raw", vlan)
 
-            # Build proper VLAN sub-interface creation payload.
-            # Extract the VLAN tag from the name (e.g., "X4:V101" -> 101)
+            # Extract VLAN tag
             vlan_tag = vlan.get("vlan_tag", "")
             if not vlan_tag:
-                # Try to parse from name
                 name = vlan.get("name", "")
                 for sep in [":V", ":v", ".V", ".v"]:
                     if sep in name:
@@ -1455,49 +1471,26 @@ class SonicWallMigrator:
                 logger.warning(f"    FAILED VLAN: {vlan.get('name', '?')} — could not determine VLAN tag")
                 continue
 
-            # Build the VLAN sub-interface in the correct SonicOS format
-            vlan_config = {
-                "parent-interface": tgt_parent,
-                "vlan-tag": int(vlan_tag),
-            }
+            vlan_tag = int(vlan_tag)
 
-            # Add zone if available
+            # Extract zone, IP, and mask from the vlan dict and _raw
             zone = vlan.get("zone", "") or raw.get("zone", "")
-            if zone:
-                vlan_config["zone"] = zone
-
-            # Add IP configuration
             ip_addr = vlan.get("ip", "")
             if not ip_addr and isinstance(raw.get("ip"), dict):
                 ip_addr = raw["ip"].get("ip", "")
-            elif not ip_addr:
+            if not ip_addr:
                 ip_addr = raw.get("ip-address", "") or raw.get("ip_address", "")
-
-            subnet = (raw.get("netmask", "") or raw.get("subnet-mask", "") or
-                      raw.get("mask", "") or raw.get("subnet_mask", ""))
+            subnet = vlan.get("mask", "")
             if not subnet and isinstance(raw.get("ip"), dict):
-                subnet = raw["ip"].get("netmask", "") or raw["ip"].get("mask", "")
-
-            if ip_addr and subnet:
-                vlan_config["mode"] = "static"
-                vlan_config["ip-address"] = ip_addr
-                vlan_config["subnet-mask"] = subnet
-
-            # Add comment if present
+                subnet = (raw["ip"].get("mask", "") or raw["ip"].get("netmask", "") or
+                          raw["ip"].get("subnet_mask", ""))
+            if not subnet:
+                subnet = (raw.get("netmask", "") or raw.get("subnet-mask", "") or
+                          raw.get("mask", "") or raw.get("subnet_mask", ""))
             comment = raw.get("comment", "") or vlan.get("comment", "")
-            if comment:
-                vlan_config["comment"] = comment
-
-            # Add management settings if present
             mgmt = raw.get("management", {})
-            if mgmt:
-                vlan_config["management"] = mgmt
 
-            # Generate a display name
             vlan_display = f"{tgt_parent}:V{vlan_tag}"
-
-            # Build POST body in the SonicOS array format
-            body = {"interfaces": [{"vlan": vlan_config}]}
 
             if self.dry_run:
                 zone_str = f" zone={zone}" if zone else ""
@@ -1506,47 +1499,86 @@ class SonicWallMigrator:
                 vlan_successes += 1
                 continue
 
-            logger.debug(f"    VLAN POST body: {json.dumps(body)}")
+            # --- SonicOS 7.x VLAN creation ---
+            # Per SonicWall community & API docs:
+            #   POST /api/sonicos/interfaces/ipv4  (same endpoint as physical interfaces)
+            #   PUT  /api/sonicos/interfaces/ipv4/name/{PARENT}/vlan/{TAG}
+            # Body uses the standard ipv4 interface schema.
 
-            ok, resp = self.target._post("interfaces/vlan", body)
+            # Build the VLAN interface body in ipv4 format
+            vlan_ipv4 = {
+                "vlan": vlan_tag,
+                "name": tgt_parent,
+            }
+            if zone:
+                vlan_ipv4["zone"] = zone
+            if ip_addr and subnet:
+                vlan_ipv4["ip_assignment"] = "static"
+                vlan_ipv4["ip"] = {"ip": ip_addr, "netmask": subnet}
+            if comment:
+                vlan_ipv4["comment"] = comment
+            if mgmt and isinstance(mgmt, dict):
+                # Only include if there's at least one true value
+                if any(v for v in mgmt.values() if v is True):
+                    vlan_ipv4["management"] = mgmt
+
+            # Primary format: POST interfaces/ipv4 with ipv4 wrapper
+            body_primary = {"interfaces": [{"ipv4": vlan_ipv4}]}
+
+            logger.debug(f"    VLAN POST body: {json.dumps(body_primary)}")
+
+            ok, resp = self.target._post("interfaces/ipv4", body_primary)
             if ok:
                 vlan_successes += 1
                 logger.info(f"    Created VLAN: {vlan_display}")
-            else:
-                # Try alternative body formats for different SonicOS versions
-                # Gen7 may want singular "interface" key or different endpoint
-                alt_bodies = [
-                    ("interfaces/vlan", {"interface": {"vlan": vlan_config}}),
-                    ("interfaces/ipv4", {"interfaces": [{"vlan": vlan_config}]}),
-                    ("interfaces/ipv4", {"interface": {"vlan": vlan_config}}),
-                ]
-                created = False
-                for alt_ep, alt_body in alt_bodies:
-                    ok2, resp2 = self.target._post(alt_ep, alt_body)
-                    if ok2:
-                        vlan_successes += 1
-                        logger.info(f"    Created VLAN: {vlan_display}")
-                        created = True
-                        break
+                continue
 
-                if not created:
-                    # Try PUT as last resort (update existing)
-                    ok3, resp3 = self.target._put("interfaces/vlan", body)
-                    if ok3:
-                        vlan_successes += 1
-                        logger.info(f"    Updated VLAN: {vlan_display}")
-                    else:
-                        vlan_errors += 1
-                        # Log the most informative error
-                        msg = ""
-                        for r in [resp, resp3]:
-                            if r:
-                                status = r.get("status", {})
-                                for info in status.get("info", []):
-                                    m = info.get("message", "")
-                                    if m and m not in msg:
-                                        msg += m + " | "
-                        logger.warning(f"    FAILED VLAN: {vlan_display} — {msg.rstrip(' | ')}")
+            # Try alternative body formats
+            alt_attempts = [
+                # Without ipv4 wrapper
+                ("interfaces/ipv4", {"interface": {"ipv4": vlan_ipv4}}),
+                # With vlan sub-key format (user's original working format)
+                ("interfaces/ipv4", {"interface": {
+                    "parent-interface": tgt_parent,
+                    "vlan-tag": vlan_tag,
+                    "zone": zone or "LAN",
+                    "mode": "static" if ip_addr else "",
+                    "ip-address": ip_addr,
+                    "subnet-mask": subnet,
+                    "comment": comment,
+                }}),
+            ]
+
+            created = False
+            for alt_ep, alt_body in alt_attempts:
+                # Remove empty string values
+                if "interface" in alt_body and isinstance(alt_body["interface"], dict):
+                    alt_body["interface"] = {k: v for k, v in alt_body["interface"].items() if v}
+                ok2, resp2 = self.target._post(alt_ep, alt_body)
+                if ok2:
+                    vlan_successes += 1
+                    logger.info(f"    Created VLAN: {vlan_display}")
+                    created = True
+                    break
+
+            if not created:
+                # Try PUT to update if it already exists
+                put_ep = f"interfaces/ipv4/name/{tgt_parent}/vlan/{vlan_tag}"
+                ok3, resp3 = self.target._put(put_ep, {"interface": {"ipv4": vlan_ipv4}})
+                if ok3:
+                    vlan_successes += 1
+                    logger.info(f"    Updated VLAN: {vlan_display}")
+                else:
+                    vlan_errors += 1
+                    msg = ""
+                    for r in [resp, resp3]:
+                        if r and isinstance(r, dict):
+                            status = r.get("status", {})
+                            for info in status.get("info", []):
+                                m = info.get("message", "")
+                                if m and m not in msg:
+                                    msg += m + " | "
+                    logger.warning(f"    FAILED VLAN: {vlan_display} — {msg.rstrip(' | ')}")
 
         if vlan_successes > 0 and not self.dry_run:
             self.target.commit()

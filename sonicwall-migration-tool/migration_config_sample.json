@@ -1,0 +1,42 @@
+{
+    "source": {
+        "host": "192.168.1.1",
+        "port": 443,
+        "username": "admin",
+        "password": "SOURCE_PASSWORD_HERE"
+    },
+    "target": {
+        "host": "192.168.1.2",
+        "port": 443,
+        "username": "admin",
+        "password": "TARGET_PASSWORD_HERE"
+    },
+    "resources": [
+        "Zones",
+        "Address Objects (IPv4)",
+        "Address Objects (IPv6)",
+        "Address Objects (FQDN)",
+        "Address Objects (MAC)",
+        "Address Groups (IPv4)",
+        "Address Groups (IPv6)",
+        "Service Objects",
+        "Service Groups",
+        "Schedule Objects",
+        "Schedule Groups",
+        "Route Policies (IPv4)",
+        "Route Policies (IPv6)",
+        "NAT Policies (IPv4)",
+        "NAT Policies (IPv6)",
+        "Access Rules (IPv4)",
+        "Access Rules (IPv6)",
+        "VPN Policies (Site-to-Site)",
+        "Content Filter Profiles",
+        "User Local Groups",
+        "User Local"
+    ],
+    "skip_resources": [],
+    "migrate_interfaces": true,
+    "dry_run": false,
+    "verbose": false,
+    "commit_per_resource": true
+}
