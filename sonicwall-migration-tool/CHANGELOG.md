@@ -1,6 +1,17 @@
 # Changelog
 
-## v1.4.0 (2026-02-26)
+## v1.4.3 (2026-02-27)
+
+### Fixed
+- **Gen6 `ip_assignment` structure**: Gen6 SonicOS API nests zone and IP configuration inside `ip_assignment.zone` and `ip_assignment.mode.static.{ip,netmask}` — extraction now handles this for both physical interfaces and VLAN sub-interfaces
+- **VLAN POST body**: Now sends the full `ip_assignment` nested structure which Gen7 accepts (same format used for physical interfaces)
+- **VLAN PUT schema error**: Fixed `"property 'interfaces' expected '['"` by using array wrapper format for PUT endpoint
+- **Default NAT Policy filtering**: Built-in "Default NAT Policy" and "IPv6 Default NAT Policy" now filtered (can't be overwritten)
+- **SSL VPN NAT filtering**: Extended to also filter IPv6 SSL VPN NATs referencing zone-specific `Interface IPv6 Addresses` groups
+- Diagnostic logging moved to DEBUG level for cleaner production output
+
+## v1.2.0 – v1.4.2 (2026-02-26)
+Iterative bug fixes during live testing: Gen6 VLAN detection, cross-generation field stripping, auto-generated object filtering (NATs, routes, access rules, service groups, ICMPv6), zone migration ordering, VLAN endpoint discovery, and `ip_assignment` structure handling.
 
 ### Fixed
 - **VLAN creation endpoint**: Changed from `interfaces/vlan` (doesn't exist on Gen 7) to `POST /api/sonicos/interfaces/ipv4` with proper `ipv4` schema body — the correct endpoint per SonicWall API documentation

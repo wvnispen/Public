@@ -29,7 +29,7 @@ import sys
 import os
 import time
 
-__version__ = "1.4.1"
+__version__ = "1.4.3"
 import logging
 import argparse
 import getpass
@@ -419,7 +419,7 @@ class SonicWallAPI:
             name_counts[n] = name_counts.get(n, 0) + 1
         for dup_name, count in name_counts.items():
             if count > 1:
-                logger.info(f"  [GEN6-RAW] Interface '{dup_name}' appears {count} times:")
+                logger.debug(f"  [GEN6-RAW] Interface '{dup_name}' appears {count} times:")
                 for idx, iface in enumerate(interfaces):
                     if iface.get("name", "") == dup_name:
                         # Truncate large fields for readability
@@ -461,11 +461,29 @@ class SonicWallAPI:
 
             # Only add the first occurrence as physical
             if seen_names[name] == 1:
-                ip = (iface.get("ip", {}).get("ip", "") if isinstance(iface.get("ip"), dict)
-                      else iface.get("ip", ""))
-                mask = (iface.get("ip", {}).get("mask", "") if isinstance(iface.get("ip"), dict)
-                        else iface.get("mask", ""))
+                # Extract zone, IP, mask — handle Gen6 ip_assignment nesting
+                ip = ""
+                mask = ""
                 zone = iface.get("zone", "")
+
+                ip_assign = iface.get("ip_assignment", {})
+                if isinstance(ip_assign, dict) and ip_assign:
+                    if not zone:
+                        zone = ip_assign.get("zone", "")
+                    mode = ip_assign.get("mode", {})
+                    if isinstance(mode, dict):
+                        static = mode.get("static", {})
+                        if isinstance(static, dict):
+                            ip = static.get("ip", "")
+                            mask = static.get("netmask", "") or static.get("mask", "")
+
+                if not ip:
+                    ip = (iface.get("ip", {}).get("ip", "") if isinstance(iface.get("ip"), dict)
+                          else iface.get("ip", ""))
+                if not mask:
+                    mask = (iface.get("ip", {}).get("mask", "") if isinstance(iface.get("ip"), dict)
+                          else iface.get("mask", ""))
+
                 physical.append({
                     "name": name,
                     "zone": zone,
@@ -494,7 +512,7 @@ class SonicWallAPI:
                     all_vlan_items.append(iface)
                     # Dump raw data for diagnostics
                     display = {k: v for k, v in iface.items() if not k.startswith("_")}
-                    logger.info(f"    [GEN6-VLAN] Found via {'name' if has_separator else 'vlan field'}: "
+                    logger.debug(f"    [GEN6-VLAN] Found via {'name' if has_separator else 'vlan field'}: "
                                 f"{json.dumps(display, default=str)}")
 
         # Gen6 special case: if we saw duplicate interface names (e.g., X4 
@@ -513,16 +531,16 @@ class SonicWallAPI:
                     ip_val = (iface.get("ip", {}).get("ip", "") if isinstance(iface.get("ip"), dict)
                               else iface.get("ip", ""))
                     vlan_field = iface.get("vlan", "")
-                    logger.info(f"    [VLAN-DETECT] Duplicate '{name}': "
+                    logger.debug(f"    [VLAN-DETECT] Duplicate '{name}': "
                                 f"zone={zone!r} ip={ip_val!r} vlan={vlan_field!r} "
                                 f"stored_zone={stored['zone']!r} stored_ip={stored['ip']!r}")
-                    logger.info(f"    [VLAN-DETECT]   Raw keys: {sorted(iface.keys())}")
+                    logger.debug(f"    [VLAN-DETECT]   Raw keys: {sorted(iface.keys())}")
                     # Accept as VLAN if: different zone/IP OR has a vlan field
                     if (zone != stored["zone"] or ip_val != stored["ip"] or
                             (vlan_field and str(vlan_field) not in ("", "0"))):
                         if iface not in all_vlan_items:
                             all_vlan_items.append(iface)
-                            logger.info(f"    [VLAN-DETECT]   => Added as VLAN")
+                            logger.debug(f"    [VLAN-DETECT]   => Added as VLAN")
 
         # Parse VLAN items into the vlan_map structure
         for vlan in all_vlan_items:
@@ -552,14 +570,35 @@ class SonicWallAPI:
                 if parent not in vlan_map:
                     vlan_map[parent] = []
 
-                ip = (vlan.get("ip", {}).get("ip", "") if isinstance(vlan.get("ip"), dict)
-                      else vlan.get("ip", ""))
+                # Extract zone, IP, and mask — handle multiple API formats:
+                # Gen7/8: zone at top level, ip as {"ip": "...", "netmask": "..."}
+                # Gen6:   nested in ip_assignment.zone and ip_assignment.mode.static
                 zone = vlan.get("zone", "")
+                ip = ""
                 mask = ""
-                if isinstance(vlan.get("ip"), dict):
-                    mask = (vlan["ip"].get("mask", "") or
-                            vlan["ip"].get("netmask", "") or
-                            vlan["ip"].get("subnet_mask", ""))
+
+                # Check for Gen6 ip_assignment structure first
+                ip_assign = vlan.get("ip_assignment", {})
+                if isinstance(ip_assign, dict) and ip_assign:
+                    if not zone:
+                        zone = ip_assign.get("zone", "")
+                    mode = ip_assign.get("mode", {})
+                    if isinstance(mode, dict):
+                        static = mode.get("static", {})
+                        if isinstance(static, dict):
+                            ip = static.get("ip", "")
+                            mask = static.get("netmask", "") or static.get("mask", "")
+
+                # Fallback: standard flat/nested ip structure
+                if not ip:
+                    if isinstance(vlan.get("ip"), dict):
+                        ip = vlan["ip"].get("ip", "")
+                        if not mask:
+                            mask = (vlan["ip"].get("mask", "") or
+                                    vlan["ip"].get("netmask", ""))
+                    else:
+                        ip = vlan.get("ip", "") or vlan.get("ip-address", "")
+
                 if not mask:
                     mask = (vlan.get("mask", "") or vlan.get("netmask", "") or
                             vlan.get("subnet_mask", "") or vlan.get("subnet-mask", ""))
@@ -580,7 +619,7 @@ class SonicWallAPI:
         # Log VLAN summary for diagnostics
         for parent, vlans_list in vlan_map.items():
             for v in vlans_list:
-                logger.info(f"    [VLAN-MAP] {v['name']}: zone={v['zone']!r} "
+                logger.debug(f"    [VLAN-MAP] {v['name']}: zone={v['zone']!r} "
                             f"ip={v['ip']!r} mask={v['mask']!r} tag={v['vlan_tag']!r}")
 
         return {
@@ -1511,30 +1550,55 @@ class SonicWallMigrator:
             vlan_tag = int(vlan_tag)
 
             # Extract zone, IP, and mask from the vlan dict and _raw
-            # Log the raw data for diagnostics (VLAN config issues are common)
-            logger.info(f"    VLAN {vlan.get('name', '?')}: vlan_dict keys={list(vlan.keys())}")
-            logger.info(f"      zone={vlan.get('zone', '')!r}, ip={vlan.get('ip', '')!r}, mask={vlan.get('mask', '')!r}")
-            logger.info(f"      _raw keys={list(raw.keys()) if isinstance(raw, dict) else 'N/A'}")
-            logger.info(f"      _raw zone={raw.get('zone', '')!r}, ip={raw.get('ip', '')!r}")
-
-            zone = vlan.get("zone", "") or raw.get("zone", "")
+            # Gen6 nests data in ip_assignment.zone and ip_assignment.mode.static
+            zone = vlan.get("zone", "")
             ip_addr = vlan.get("ip", "")
-            if not ip_addr and isinstance(raw.get("ip"), dict):
-                ip_addr = raw["ip"].get("ip", "")
-            if not ip_addr:
-                ip_addr = raw.get("ip-address", "") or raw.get("ip_address", "")
             subnet = vlan.get("mask", "")
-            if not subnet and isinstance(raw.get("ip"), dict):
-                subnet = (raw["ip"].get("mask", "") or raw["ip"].get("netmask", "") or
-                          raw["ip"].get("subnet_mask", ""))
+
+            # Helper: extract from ip_assignment structure (Gen6)
+            def _extract_ip_assignment(obj):
+                z, i, m = "", "", ""
+                ip_assign = obj.get("ip_assignment", {})
+                if isinstance(ip_assign, dict) and ip_assign:
+                    z = ip_assign.get("zone", "")
+                    mode = ip_assign.get("mode", {})
+                    if isinstance(mode, dict):
+                        static = mode.get("static", {})
+                        if isinstance(static, dict):
+                            i = static.get("ip", "")
+                            m = static.get("netmask", "") or static.get("mask", "")
+                return z, i, m
+
+            # Try vlan dict first, then _raw
+            for source_obj in [vlan, raw]:
+                z, i, m = _extract_ip_assignment(source_obj)
+                if not zone and z:
+                    zone = z
+                if not ip_addr and i:
+                    ip_addr = i
+                if not subnet and m:
+                    subnet = m
+
+            # Fallback: standard flat/nested structures
+            if not zone:
+                zone = raw.get("zone", "")
+            if not ip_addr:
+                if isinstance(raw.get("ip"), dict):
+                    ip_addr = raw["ip"].get("ip", "")
+                else:
+                    ip_addr = raw.get("ip-address", "") or raw.get("ip_address", "")
             if not subnet:
-                subnet = (raw.get("netmask", "") or raw.get("subnet-mask", "") or
-                          raw.get("mask", "") or raw.get("subnet_mask", ""))
+                if isinstance(raw.get("ip"), dict):
+                    subnet = (raw["ip"].get("mask", "") or raw["ip"].get("netmask", ""))
+                else:
+                    subnet = (raw.get("netmask", "") or raw.get("subnet-mask", "") or
+                              raw.get("mask", "") or raw.get("subnet_mask", ""))
+
             comment = raw.get("comment", "") or vlan.get("comment", "")
             mgmt = raw.get("management", {})
 
             vlan_display = f"{tgt_parent}:V{vlan_tag}"
-            logger.info(f"      => Extracted: zone={zone!r}, ip={ip_addr!r}, mask={subnet!r}")
+            logger.info(f"    VLAN {vlan_display}: zone={zone!r}, ip={ip_addr!r}, mask={subnet!r}")
 
             if self.dry_run:
                 zone_str = f" zone={zone}" if zone else ""
@@ -1550,15 +1614,27 @@ class SonicWallMigrator:
             # Body uses the standard ipv4 interface schema.
 
             # Build the VLAN interface body in ipv4 format
+            # Use the Gen6 ip_assignment structure — Gen7 accepts this for
+            # physical interfaces, so it should also work for VLANs
             vlan_ipv4 = {
                 "vlan": vlan_tag,
                 "name": tgt_parent,
             }
-            if zone:
-                vlan_ipv4["zone"] = zone
-            if ip_addr and subnet:
-                vlan_ipv4["ip_assignment"] = "static"
-                vlan_ipv4["ip"] = {"ip": ip_addr, "netmask": subnet}
+
+            # Build ip_assignment in the Gen6 nested format
+            if zone or (ip_addr and subnet):
+                ip_assignment = {}
+                if zone:
+                    ip_assignment["zone"] = zone
+                if ip_addr and subnet:
+                    ip_assignment["mode"] = {
+                        "static": {
+                            "ip": ip_addr,
+                            "netmask": subnet,
+                        }
+                    }
+                vlan_ipv4["ip_assignment"] = ip_assignment
+
             if comment:
                 vlan_ipv4["comment"] = comment
             if mgmt and isinstance(mgmt, dict):
@@ -1569,7 +1645,7 @@ class SonicWallMigrator:
             # Primary format: POST interfaces/ipv4 with ipv4 wrapper
             body_primary = {"interfaces": [{"ipv4": vlan_ipv4}]}
 
-            logger.info(f"    VLAN POST body: {json.dumps(body_primary)}")
+            logger.debug(f"    VLAN POST body: {json.dumps(body_primary)}")
 
             ok, resp = self.target._post("interfaces/ipv4", body_primary)
             if ok:
@@ -1578,17 +1654,23 @@ class SonicWallMigrator:
                 # After creation, configure zone/IP via PUT if we have data
                 if zone or ip_addr:
                     put_ep = f"interfaces/ipv4/name/{tgt_parent}/vlan/{vlan_tag}"
-                    put_body = {"interface": {"ipv4": {}}}
+                    put_ipv4 = {}
+                    ip_assignment = {}
                     if zone:
-                        put_body["interface"]["ipv4"]["zone"] = zone
+                        ip_assignment["zone"] = zone
                     if ip_addr and subnet:
-                        put_body["interface"]["ipv4"]["ip_assignment"] = "static"
-                        put_body["interface"]["ipv4"]["ip"] = {"ip": ip_addr, "netmask": subnet}
+                        ip_assignment["mode"] = {
+                            "static": {"ip": ip_addr, "netmask": subnet}
+                        }
+                    if ip_assignment:
+                        put_ipv4["ip_assignment"] = ip_assignment
                     if comment:
-                        put_body["interface"]["ipv4"]["comment"] = comment
+                        put_ipv4["comment"] = comment
                     if mgmt and isinstance(mgmt, dict) and any(v is True for v in mgmt.values()):
-                        put_body["interface"]["ipv4"]["management"] = mgmt
+                        put_ipv4["management"] = mgmt
+                    put_body = {"interfaces": [{"ipv4": put_ipv4}]}
                     logger.info(f"    Configuring {vlan_display}: zone={zone}, ip={ip_addr}/{subnet}")
+                    logger.debug(f"    PUT body: {json.dumps(put_body)}")
                     ok_put, resp_put = self.target._put(put_ep, put_body)
                     if ok_put:
                         logger.info(f"    Configured {vlan_display} settings")
