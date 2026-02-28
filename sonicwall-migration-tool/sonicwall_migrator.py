@@ -308,17 +308,38 @@ class SonicWallAPI:
         """Commit pending configuration changes."""
         logger.info(f"[{self.label}] Committing pending changes ...")
         url = f"{self.base_url}/config/pending"
-        try:
-            resp = self.session.post(url, timeout=60)
-            if resp.status_code == 200:
-                logger.info(f"[{self.label}] Commit successful.")
-                return True
-            else:
-                logger.warning(f"[{self.label}] Commit returned HTTP {resp.status_code}")
-                return False
-        except Exception as e:
-            logger.error(f"[{self.label}] Commit error: {e}")
-            return False
+        for attempt in range(3):
+            try:
+                resp = self.session.post(url, timeout=60)
+                if resp.status_code == 200:
+                    logger.info(f"[{self.label}] Commit successful.")
+                    return True
+                else:
+                    # Log the error response body for diagnostics
+                    try:
+                        body = resp.json()
+                        msg = ""
+                        for info in body.get("status", {}).get("info", []):
+                            msg += info.get("message", "") + " "
+                        if msg:
+                            logger.warning(f"[{self.label}] Commit HTTP {resp.status_code}: {msg.strip()}")
+                        else:
+                            logger.warning(f"[{self.label}] Commit returned HTTP {resp.status_code}")
+                    except Exception:
+                        logger.warning(f"[{self.label}] Commit returned HTTP {resp.status_code}")
+
+                    if attempt < 2:
+                        logger.info(f"[{self.label}] Retrying commit (attempt {attempt + 2}/3)...")
+                        time.sleep(2)
+                    else:
+                        return False
+            except Exception as e:
+                logger.error(f"[{self.label}] Commit error: {e}")
+                if attempt < 2:
+                    time.sleep(2)
+                else:
+                    return False
+        return False
 
     # ------------------------------------------------------------------
     # Interface & VLAN discovery
@@ -1151,6 +1172,16 @@ class SonicWallMigrator:
             "bandwidth_management", "bandwidth-management",
         ]
 
+        # Management sub-fields Gen8 doesn't accept from Gen7
+        # (e.g. https_source, ping_source, snmp_source, ssh_source)
+        mgmt_strip_fields = [
+            "https_source", "https-source",
+            "ping_source", "ping-source",
+            "snmp_source", "snmp-source",
+            "ssh_source", "ssh-source",
+            "fqdn_source", "fqdn-source",
+        ]
+
         cleaned = {}
         for k, v in item.items():
             if k in keys_to_remove:
@@ -1163,6 +1194,10 @@ class SonicWallMigrator:
 
             # Strip interface-specific fields that Gen7 rejects from Gen6
             if k in interface_strip_fields:
+                continue
+
+            # Strip management sub-fields Gen8 rejects from Gen7
+            if k in mgmt_strip_fields:
                 continue
 
             # Strip string values like "auto-negotiate" that Gen7 doesn't accept
@@ -1182,7 +1217,17 @@ class SonicWallMigrator:
     # ------------------------------------------------------------------
     # Interface & VLAN migration
     # ------------------------------------------------------------------
-    def compare_interfaces(self) -> dict:
+    def _commit_and_reauth(self, pause: float = 1.0):
+        """Commit pending changes and re-authenticate.
+        Some firmware versions (especially Gen8) invalidate the API session
+        when committing changes, so we re-login and re-enter config mode.
+        """
+        result = self.target.commit()
+        time.sleep(pause)
+        # Re-authenticate to handle session invalidation on commit
+        self.target.login()
+        self.target._enter_config_mode()
+        return result
         """
         Compare interfaces between source and target firewalls.
         Returns a dict with comparison results and compatibility info.
@@ -1519,8 +1564,8 @@ class SonicWallMigrator:
 
         # Commit interfaces before VLANs (VLANs depend on parent config)
         if successes > 0 and not self.dry_run:
-            self.target.commit()
-            time.sleep(2)
+            self._commit_and_reauth(pause=2)
+            # Re-authenticate already handled by _commit_and_reauth
 
         # --- Migrate VLAN sub-interfaces ---
         vlan_successes = 0
@@ -1730,8 +1775,7 @@ class SonicWallMigrator:
                     logger.warning(f"    FAILED VLAN: {vlan_display} — {msg.rstrip(' | ')}")
 
         if vlan_successes > 0 and not self.dry_run:
-            self.target.commit()
-            time.sleep(1)
+            self._commit_and_reauth()
 
         # Update stats
         self.stats["imported"]["Interfaces"] = successes
@@ -1887,8 +1931,7 @@ class SonicWallMigrator:
 
             # Commit after each resource group for safety
             if success > 0 and not self.dry_run:
-                self.target.commit()
-                time.sleep(1)  # Brief pause to let the firewall settle
+                self._commit_and_reauth()
 
     def _import_resource(self, resource: dict, items: list) -> tuple:
         """Import a list of items for a given resource. Returns (success_count, error_count)."""
@@ -1950,15 +1993,27 @@ class SonicWallMigrator:
                 )
 
                 if already_exists:
-                    logger.debug(f"    Already exists, trying PUT: {item_name}")
-                    ok2, resp2 = self.target._put(endpoint, body)
-                    if ok2:
-                        successes += 1
-                        logger.debug(f"    Updated: {item_name}")
+                    # For service groups: skip PUT on built-in groups.
+                    # Updating built-in service groups creates uncommittable
+                    # pending changes that cause commit HTTP 500, which then
+                    # discards ALL pending changes (including custom objects).
+                    skip_update = False
+                    if "service-group" in endpoint or "Service Group" in resource.get("name", ""):
+                        skip_update = True
+                        logger.debug(f"    Skipping update of existing service group: {item_name}")
+
+                    if skip_update:
+                        successes += 1  # Count as success (it exists)
                     else:
-                        errors += 1
-                        logger.warning(f"    FAILED (update): {item_name}")
-                        logger.debug(f"    Response: {json.dumps(resp2, indent=2)[:300]}")
+                        logger.debug(f"    Already exists, trying PUT: {item_name}")
+                        ok2, resp2 = self.target._put(endpoint, body)
+                        if ok2:
+                            successes += 1
+                            logger.debug(f"    Updated: {item_name}")
+                        else:
+                            errors += 1
+                            logger.warning(f"    FAILED (update): {item_name}")
+                            logger.debug(f"    Response: {json.dumps(resp2, indent=2)[:300]}")
                 else:
                     errors += 1
                     msg = ""
@@ -2322,6 +2377,16 @@ Config JSON format:
         # 2. Migrate interfaces & VLANs (address objects/rules reference them)
         # 3. Import all remaining config (objects, services, NAT, rules)
 
+        # Re-authenticate to target — interactive prompts may have taken long
+        # enough for the SonicOS session to time out (especially Gen7 with
+        # short inactivity timeouts).
+        logger.info("  Refreshing target session...")
+        if not migrator.target.login():
+            logger.error("  Failed to re-authenticate to target. Aborting.")
+            return
+        # Re-enter config mode after re-auth
+        migrator.target._enter_config_mode()
+
         # Step 1: Import zones early so interfaces can reference them
         zone_resource = next(
             (r for r in MIGRATION_RESOURCES if r["name"] == "Zones"), None
@@ -2334,8 +2399,7 @@ Config JSON format:
             migrator.stats["errors"]["Zones"] = errors
             migrator.stats["exported"]["Zones"] = len(zone_items)
             if success > 0:
-                migrator.target.commit()
-                time.sleep(1)
+                migrator._commit_and_reauth()
             if errors:
                 logger.warning(f"    => {success} zones ok, {errors} failed")
             else:
