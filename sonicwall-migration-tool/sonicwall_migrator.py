@@ -950,11 +950,13 @@ class SonicWallMigrator:
     """Orchestrates the export from source and import to target."""
 
     def __init__(self, source: SonicWallAPI, target: SonicWallAPI = None,
-                 dry_run: bool = False, skip_resources: list = None):
+                 dry_run: bool = False, skip_resources: list = None,
+                 commit_per_resource: bool = True):
         self.source = source
         self.target = target
         self.dry_run = dry_run
         self.skip_resources = skip_resources or []
+        self.commit_per_resource = commit_per_resource
         self.exported_config = {}
         self.stats = {
             "exported": {},
@@ -1228,6 +1230,8 @@ class SonicWallMigrator:
         self.target.login()
         self.target._enter_config_mode()
         return result
+
+    def compare_interfaces(self) -> dict:
         """
         Compare interfaces between source and target firewalls.
         Returns a dict with comparison results and compatibility info.
@@ -1941,6 +1945,11 @@ class SonicWallMigrator:
         sub_key = resource.get("sub_key")
         successes = 0
         errors = 0
+        pending_changes = 0  # Track uncommitted changes for batch commits
+
+        # Batch commit threshold — commit every N items to prevent
+        # overwhelming smaller hardware (e.g., TZ 280 hangs on large commits)
+        BATCH_COMMIT_SIZE = 10
 
         for item in items:
             cleaned = self._clean_item_for_import(item)
@@ -1981,6 +1990,7 @@ class SonicWallMigrator:
             ok, resp = self.target._post(endpoint, body)
             if ok:
                 successes += 1
+                pending_changes += 1
                 logger.debug(f"    Created: {item_name}")
             else:
                 # Check if it already exists — try PUT to update instead
@@ -1993,14 +2003,17 @@ class SonicWallMigrator:
                 )
 
                 if already_exists:
-                    # For service groups: skip PUT on built-in groups.
+                    # For service groups and service objects: skip PUT on built-in items.
                     # Updating built-in service groups creates uncommittable
                     # pending changes that cause commit HTTP 500, which then
                     # discards ALL pending changes (including custom objects).
+                    # Built-in service objects generate excessive pending changes
+                    # that can overwhelm lower-end hardware (TZ series).
                     skip_update = False
-                    if "service-group" in endpoint or "Service Group" in resource.get("name", ""):
+                    if ("service-group" in endpoint or "Service Group" in resource.get("name", "") or
+                            "service-object" in endpoint or "Service Object" in resource.get("name", "")):
                         skip_update = True
-                        logger.debug(f"    Skipping update of existing service group: {item_name}")
+                        logger.debug(f"    Skipping update of existing service: {item_name}")
 
                     if skip_update:
                         successes += 1  # Count as success (it exists)
@@ -2009,6 +2022,7 @@ class SonicWallMigrator:
                         ok2, resp2 = self.target._put(endpoint, body)
                         if ok2:
                             successes += 1
+                            pending_changes += 1
                             logger.debug(f"    Updated: {item_name}")
                         else:
                             errors += 1
@@ -2021,6 +2035,13 @@ class SonicWallMigrator:
                         msg += i.get("message", "")
                     logger.warning(f"    FAILED: {item_name} — {msg}")
                     logger.debug(f"    Body: {json.dumps(body, indent=2)[:300]}")
+
+            # Batch commit to prevent overwhelming smaller hardware
+            if (self.commit_per_resource and pending_changes >= BATCH_COMMIT_SIZE
+                    and not self.dry_run):
+                logger.info(f"    Batch commit ({pending_changes} pending changes)...")
+                self._commit_and_reauth()
+                pending_changes = 0
 
         return successes, errors
 
@@ -2178,6 +2199,7 @@ Config JSON format:
     skip_resources = []
     dry_run = args.dry_run
     migrate_interfaces_flag = None  # None = ask, True/False = from config
+    commit_per_resource = True  # Default: commit in batches within resources
 
     # Load from config file if provided
     if args.config:
@@ -2188,6 +2210,7 @@ Config JSON format:
         skip_resources = cfg.get("skip_resources", [])
         dry_run = cfg.get("dry_run", dry_run)
         migrate_interfaces_flag = cfg.get("migrate_interfaces")
+        commit_per_resource = cfg.get("commit_per_resource", commit_per_resource)
 
     # ---- IMPORT-ONLY MODE ----
     if args.import_only:
@@ -2307,6 +2330,7 @@ Config JSON format:
         migrator = SonicWallMigrator(
             source=source, target=None,
             dry_run=dry_run, skip_resources=skip_resources,
+            commit_per_resource=commit_per_resource,
         )
         config = migrator.export_all()
 
