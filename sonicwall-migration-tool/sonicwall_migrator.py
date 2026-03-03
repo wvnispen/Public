@@ -29,7 +29,7 @@ import sys
 import os
 import time
 
-__version__ = "1.4.3"
+__version__ = "1.4.4"
 import logging
 import argparse
 import getpass
@@ -986,6 +986,13 @@ class SonicWallMigrator:
                     item.get("fqdn", {}).get("name", "") or
                     item.get("mac", {}).get("name", "") or "")
 
+        # Filter "Default NAT Policy" by name — these are system-generated
+        # on every SonicWall and cannot be overwritten via API.
+        # Must check here because name IS found (inside ipv4/ipv6 wrapper),
+        # so the 'if not name' branch below is skipped.
+        if name == "Default NAT Policy" and "NAT" in resource_name:
+            return True
+
         if not name:
             # For NAT/route/access rules, name is often empty — check
             # the nested ipv4/ipv6 dict for system indicators instead
@@ -1145,6 +1152,7 @@ class SonicWallMigrator:
         keys_to_remove = [
             "uuid", "statistics", "hit_count", "id", "index",
             "not_editable", "default", "readonly",
+            "priority",  # Gen7 priority values conflict with Gen8 rule ordering
         ]
 
         # Fields that cause cross-generation schema issues.
@@ -1161,7 +1169,6 @@ class SonicWallMigrator:
             "flow_reporting",        # same pattern
             "dpi_ssl",              # same pattern
             "manual",               # number on Gen6, object on Gen7
-            "priority",             # same pattern
         ]
 
         # Interface-specific fields that Gen7 doesn't accept from Gen6
@@ -1700,35 +1707,11 @@ class SonicWallMigrator:
             if ok:
                 vlan_successes += 1
                 logger.info(f"    Created VLAN: {vlan_display}")
-                # After creation, configure zone/IP via PUT if we have data
+                # POST body already includes ip_assignment with zone, IP,
+                # and mask — no separate PUT needed. Gen8 returns 404 on
+                # the PUT endpoint for VLANs.
                 if zone or ip_addr:
-                    put_ep = f"interfaces/ipv4/name/{tgt_parent}/vlan/{vlan_tag}"
-                    put_ipv4 = {}
-                    ip_assignment = {}
-                    if zone:
-                        ip_assignment["zone"] = zone
-                    if ip_addr and subnet:
-                        ip_assignment["mode"] = {
-                            "static": {"ip": ip_addr, "netmask": subnet}
-                        }
-                    if ip_assignment:
-                        put_ipv4["ip_assignment"] = ip_assignment
-                    if comment:
-                        put_ipv4["comment"] = comment
-                    if mgmt and isinstance(mgmt, dict) and any(v is True for v in mgmt.values()):
-                        put_ipv4["management"] = mgmt
-                    put_body = {"interfaces": [{"ipv4": put_ipv4}]}
-                    logger.info(f"    Configuring {vlan_display}: zone={zone}, ip={ip_addr}/{subnet}")
-                    logger.debug(f"    PUT body: {json.dumps(put_body)}")
-                    ok_put, resp_put = self.target._put(put_ep, put_body)
-                    if ok_put:
-                        logger.info(f"    Configured {vlan_display} settings")
-                    else:
-                        msg = ""
-                        if resp_put and isinstance(resp_put, dict):
-                            for info in resp_put.get("status", {}).get("info", []):
-                                msg += info.get("message", "") + " "
-                        logger.warning(f"    WARNING: VLAN {vlan_display} created but settings failed: {msg.strip()}")
+                    logger.info(f"    Configured {vlan_display}: zone={zone}, ip={ip_addr}/{subnet}")
                 continue
 
             # Try alternative body formats
@@ -1863,10 +1846,27 @@ class SonicWallMigrator:
             for item in items:
                 if self._is_default_object(item, resource["name"]):
                     skipped_count += 1
+                    # Build a descriptive label for the skipped item
                     skipped_name = ""
                     if isinstance(item, dict):
+                        inner = item.get("ipv4", item.get("ipv6", item))
                         skipped_name = (item.get("name", "") or
-                                        item.get("ipv4", {}).get("name", "") or "")
+                                        inner.get("name", "") or "")
+                        # For rules/NATs, show zone pair and comment
+                        if not skipped_name and isinstance(inner, dict):
+                            fr = inner.get("from", "")
+                            to = inner.get("to", "")
+                            comment = inner.get("comment", "")
+                            inbound = inner.get("inbound", "")
+                            outbound = inner.get("outbound", "")
+                            if fr and to:
+                                skipped_name = f"{fr}->{to}"
+                                if comment:
+                                    skipped_name += f" ({comment})"
+                            elif inbound or outbound:
+                                skipped_name = f"{inbound}->{outbound}"
+                                if comment:
+                                    skipped_name += f" ({comment})"
                     logger.debug(f"    Skipped default: {skipped_name}")
                 else:
                     filtered.append(item)
@@ -1936,6 +1936,12 @@ class SonicWallMigrator:
             # Commit after each resource group for safety
             if success > 0 and not self.dry_run:
                 self._commit_and_reauth()
+
+            # Post-import verification for critical resources
+            # Access rules and NAT policies can be silently discarded by Gen8
+            if rname in ("Access Rules (IPv4)", "Access Rules (IPv6)",
+                         "NAT Policies (IPv4)", "NAT Policies (IPv6)"):
+                self._verify_imported(resource, items)
 
     def _import_resource(self, resource: dict, items: list) -> tuple:
         """Import a list of items for a given resource. Returns (success_count, error_count)."""
@@ -2046,6 +2052,145 @@ class SonicWallMigrator:
         return successes, errors
 
     # ------------------------------------------------------------------
+    # Post-import verification
+    # ------------------------------------------------------------------
+    def _verify_imported(self, resource: dict, imported_items: list):
+        """
+        Verify that imported items actually persisted on the target after commit.
+        Reads back from the target API and reports any items that are missing.
+        Critical for access rules and NAT policies where Gen8 may silently
+        discard rules accepted via API.
+        """
+        if self.dry_run or not self.target:
+            return
+
+        rname = resource["name"]
+        endpoint = resource["endpoint_get"]
+        key = resource["key"]
+        sub_key = resource.get("sub_key")
+
+        logger.info(f"    Verifying {rname} on target ...")
+
+        # Read back from target
+        resp = self.target._get(endpoint)
+        if not resp:
+            logger.warning(f"    Verification: could not read back {rname} from target")
+            return
+
+        target_items = resp.get(key, [])
+        if isinstance(target_items, dict):
+            if sub_key and sub_key in target_items:
+                target_items = target_items[sub_key]
+            else:
+                target_items = [target_items]
+        if not isinstance(target_items, list):
+            target_items = [target_items] if target_items else []
+
+        # Build a set of identifying signatures from target items.
+        # Access rules/NATs don't have unique names, so we build a
+        # signature from zone pair + service + source/dest + action.
+        def _item_signature(item: dict) -> str:
+            """Build a signature string to identify an item."""
+            inner = item
+            if sub_key and sub_key in item and isinstance(item[sub_key], dict):
+                inner = item[sub_key]
+
+            name = inner.get("name", "")
+            # For named objects, name is sufficient
+            if name and name != "Default NAT Policy":
+                return f"name={name}"
+
+            # For rules: build from zone/inbound + service + source + dest
+            fr = inner.get("from", inner.get("inbound", ""))
+            to = inner.get("to", inner.get("outbound", ""))
+            action = inner.get("action", "")
+            comment = inner.get("comment", "")
+
+            # Service signature
+            svc = inner.get("service", {})
+            if isinstance(svc, dict):
+                svc_sig = (svc.get("name", "") or svc.get("group", "") or
+                           ("any" if svc.get("any") else str(svc)))
+            else:
+                svc_sig = str(svc)
+
+            # Source/dest signature
+            src = inner.get("source", {})
+            dst = inner.get("destination", {})
+            src_sig = ""
+            dst_sig = ""
+            if isinstance(src, dict):
+                addr = src.get("address", {})
+                if isinstance(addr, dict):
+                    src_sig = (addr.get("name", "") or addr.get("group", "") or
+                               ("any" if addr.get("any") else ""))
+            if isinstance(dst, dict):
+                addr = dst.get("address", {})
+                if isinstance(addr, dict):
+                    dst_sig = (addr.get("name", "") or addr.get("group", "") or
+                               ("any" if addr.get("any") else ""))
+
+            # For NAT policies
+            tsrc = inner.get("translated_source", {})
+            tdst = inner.get("translated_destination", {})
+            if isinstance(tsrc, dict):
+                tsrc_sig = (tsrc.get("name", "") or
+                            ("original" if tsrc.get("original") else ""))
+            else:
+                tsrc_sig = ""
+            if isinstance(tdst, dict):
+                tdst_sig = (tdst.get("name", "") or
+                            ("original" if tdst.get("original") else ""))
+            else:
+                tdst_sig = ""
+
+            parts = [fr, to, action, svc_sig, src_sig, dst_sig]
+            if tsrc_sig or tdst_sig:
+                parts.extend([tsrc_sig, tdst_sig])
+            return "|".join(str(p) for p in parts)
+
+        # Build target signature set
+        target_sigs = set()
+        for item in target_items:
+            sig = _item_signature(item)
+            target_sigs.add(sig)
+
+        # Check each imported item
+        missing = []
+        for item in imported_items:
+            cleaned = self._clean_item_for_import(item)
+            sig = _item_signature(cleaned)
+            if sig not in target_sigs:
+                # Extract a human-readable description
+                inner = cleaned
+                if sub_key and sub_key in cleaned and isinstance(cleaned[sub_key], dict):
+                    inner = cleaned[sub_key]
+                name = inner.get("name", "")
+                fr = inner.get("from", inner.get("inbound", ""))
+                to = inner.get("to", inner.get("outbound", ""))
+                comment = inner.get("comment", "")
+                svc = inner.get("service", {})
+                svc_name = ""
+                if isinstance(svc, dict):
+                    svc_name = svc.get("name", "") or svc.get("group", "")
+
+                desc = name or f"{fr}->{to}"
+                if svc_name:
+                    desc += f" svc={svc_name}"
+                if comment:
+                    desc += f" ({comment})"
+
+                missing.append(desc)
+
+        if missing:
+            logger.warning(f"    VERIFICATION: {len(missing)} items NOT found on target after commit:")
+            for desc in missing:
+                logger.warning(f"      MISSING: {desc}")
+            self.stats.setdefault("verification_missing", {})[rname] = len(missing)
+        else:
+            logger.info(f"    Verified: all {len(imported_items)} items confirmed on target")
+
+    # ------------------------------------------------------------------
     # Reporting
     # ------------------------------------------------------------------
     def print_summary(self):
@@ -2083,6 +2228,16 @@ class SonicWallMigrator:
 
         logger.info("-" * 70)
         logger.info(f"  {'TOTAL':<33} {total_exp:>10} {total_imp:>10} {total_err:>10}")
+
+        # Report verification mismatches
+        verification = self.stats.get("verification_missing", {})
+        if verification:
+            logger.info("")
+            logger.warning("  POST-IMPORT VERIFICATION WARNINGS:")
+            for rname, count in verification.items():
+                logger.warning(f"    {rname}: {count} items accepted by API but NOT found on target")
+            logger.warning("  These items may need to be created manually on the target.")
+
         logger.info("")
         logger.info(f"Full log saved to: {log_file}")
 
