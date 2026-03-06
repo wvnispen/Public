@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.4.4 (2026-03-03)
+
+### Added
+- **Post-import verification**: After importing Access Rules and NAT Policies, the tool reads them back from the target API and confirms each item persisted. Any rules silently discarded by Gen8 are reported as `MISSING` with zone pair, service, and comment for easy manual recreation
+- **Improved skip logging**: Skipped access rules/NATs now show zone pair and comment (e.g., `Skipped default: MGMT->MGMT (Auto-added management rule)`) instead of blank names
+
+### Fixed
+- **Default NAT Policy filter logic bug**: Name was extracted from `ipv4`/`ipv6` wrapper successfully, causing the `if not name` branch (where the filter check lived) to be skipped entirely. Check now runs immediately after name extraction
+- **Gen8 VLAN PUT 404**: Removed redundant PUT call after successful VLAN POST. The POST body already includes full `ip_assignment` (zone, IP, mask), and Gen8 returns 404 on the PUT endpoint for VLANs
+- **Access rule `priority` field**: Moved to unconditional removal. Gen7 exports `priority` as a dict (`{"manual": {"value": N}}`), which passed the previous type check and caused Gen8 commit failures with "Invalid priority! IPv4 access rules must be placed before IPv6 rules"
+
 ## v1.4.3 (2026-02-27)
 
 ### Fixed
