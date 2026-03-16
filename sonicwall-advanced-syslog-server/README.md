@@ -1,77 +1,85 @@
 # Sonicwall Advanced Syslog Server
 
-[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](https://github.com/YOUR_USERNAME/sonicwall-advanced-syslog-server/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04%20|%2024.04%20LTS-orange.svg)](https://ubuntu.com/)
-[![Python](https://img.shields.io/badge/Python-3.10+-yellow.svg)](https://www.python.org/)
-[![MariaDB](https://img.shields.io/badge/MariaDB-10.6+-003545.svg)](https://mariadb.org/)
+[!\[Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](https://github.com/YOUR_USERNAME/sonicwall-advanced-syslog-server/releases)
+[!\[License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[!\[Ubuntu](https://img.shields.io/badge/Ubuntu-22.04%20|%2024.04%20LTS-orange.svg)](https://ubuntu.com/)
+[!\[Python](https://img.shields.io/badge/Python-3.10+-yellow.svg)](https://www.python.org/)
+[!\[MariaDB](https://img.shields.io/badge/MariaDB-10.6+-003545.svg)](https://mariadb.org/)
 
 A self-hosted syslog collection and **firewall analytics** server with 20+ built-in security, traffic, and compliance reports. Designed primarily for SonicWall firewalls with deep Enhanced Syslog parsing, but compatible with any syslog source. Built for Ubuntu LTS with MariaDB.
 
-> **Looking for a basic syslog server without analytics?** Check out [Sonicwall Syslog Server](https://github.com/YOUR_USERNAME/sonicwall-syslog-server) — the lightweight v1.0 that handles collection, search, and host management without the reporting layer.
+> \*\*Looking for a basic syslog server without analytics?\*\* Check out \[Sonicwall Syslog Server](https://github.com/YOUR\_USERNAME/sonicwall-syslog-server) — the lightweight v1.0 that handles collection, search, and host management without the reporting layer.
 
 ## Features
 
 ### Syslog Collection
-- **Multi-protocol receiver**: UDP/514, TCP/514, TLS/6514, DTLS/6514
-- **RFC 3164 and RFC 5424** syslog parsing for any device
-- **MariaDB storage** with full-text search, partitioning, and automatic retention cleanup
-- **Batched inserts** for high-throughput ingestion
-- **Self-signed TLS certificates** generated during install (or bring your own)
+
+* **Multi-protocol receiver**: UDP/514, TCP/514, TLS/6514, DTLS/6514
+* **RFC 3164 and RFC 5424** syslog parsing for any device
+* **MariaDB storage** with full-text search, partitioning, and automatic retention cleanup
+* **Batched inserts** for high-throughput ingestion
+* **Self-signed TLS certificates** generated during install (or bring your own)
 
 ### SonicWall Deep Parsing
-- **Enhanced Syslog key=value parser** extracting 50+ structured fields per event
-- Source/destination IP, port, interface, zone, MAC, hostname
-- Protocol, application, bytes sent/received, packet counts
-- Firewall action, rule name, NAT translations
-- IPS alerts with SID, category, and priority
-- URL/web filtering with category, destination hostname, and URL path
-- VPN events with user, portal, and domain
-- **Automatic event classification** into 8 types: traffic, denied, threat, vpn, auth, admin, web, system
-- **60+ SonicWall message ID mappings** for human-readable event names
 
-### Security & Threat Reports
-- **Top Denied Hosts/IPs** — frequently blocked hosts indicating reconnaissance or malicious intent
-- **Top Denied Destinations** — blocked outbound targets suggesting data exfiltration or C2
-- **Top Permitted Applications** — applications passing through the firewall for shadow IT detection
-- **Security Threats & Attacks** — IPS alerts, virus detections, port scans, protocol anomalies
-- **Threat Summary by Category** — aggregated view grouped by IPS category
-- **Failed Authentication Attempts** — failed VPN and admin logins indicating brute-force attacks
-- **Failed Auth by Source IP** — top brute-force candidate IPs
-- **Top Potentially Infected Hosts** — internal IPs triggering the most threat alerts
+* **Enhanced Syslog key=value parser** extracting 50+ structured fields per event
+* Source/destination IP, port, interface, zone, MAC, hostname
+* Protocol, application, bytes sent/received, packet counts
+* Firewall action, rule name, NAT translations
+* IPS alerts with SID, category, and priority
+* URL/web filtering with category, destination hostname, and URL path
+* VPN events with user, portal, and domain
+* **Automatic event classification** into 8 types: traffic, denied, threat, vpn, auth, admin, web, system
+* **60+ SonicWall message ID mappings** for human-readable event names
 
-### Traffic & Bandwidth Reports
-- **Top Talkers / Bandwidth Usage** — IPs consuming the most bandwidth
-- **Inbound vs Outbound Traffic** — traffic flow by zone for detecting exfiltration
-- **Top Protocols & Services** — primary protocols (TCP, UDP, ICMP) and applications
-- **VPN Activity Report** — active users, login/failure counts, bandwidth, source IPs
-- **Hourly Traffic Volume** — time-series breakdown with denied/threat overlay
+### Security \& Threat Reports
 
-### Policy & Rule Management
-- **Firewall Rule Utilization** — identifies unused or heavily-used rules for policy optimization
-- **Configuration Change Log** — tracks who changed what and when
+* **Top Denied Hosts/IPs** — frequently blocked hosts indicating reconnaissance or malicious intent
+* **Top Denied Destinations** — blocked outbound targets suggesting data exfiltration or C2
+* **Top Permitted Applications** — applications passing through the firewall for shadow IT detection
+* **Security Threats \& Attacks** — IPS alerts, virus detections, port scans, protocol anomalies
+* **Threat Summary by Category** — aggregated view grouped by IPS category
+* **Failed Authentication Attempts** — failed VPN and admin logins indicating brute-force attacks
+* **Failed Auth by Source IP** — top brute-force candidate IPs
+* **Top Potentially Infected Hosts** — internal IPs triggering the most threat alerts
 
-### Compliance & Audit
-- **URL / Web Filtering** — website category access tracking (social, gambling, malicious, etc.)
-- **Top Websites Accessed** — most visited destinations by hit count and user count
-- **Admin Activity Report** — every administrator action on the firewall console
-- **Event Type Summary** — overview of all event types for compliance dashboards
-- **Geo-IP & Botnet Blocks** — connections blocked by geographic or botnet filtering
+### Traffic \& Bandwidth Reports
+
+* **Top Talkers / Bandwidth Usage** — IPs consuming the most bandwidth
+* **Inbound vs Outbound Traffic** — traffic flow by zone for detecting exfiltration
+* **Top Protocols \& Services** — primary protocols (TCP, UDP, ICMP) and applications
+* **VPN Activity Report** — active users, login/failure counts, bandwidth, source IPs
+* **Hourly Traffic Volume** — time-series breakdown with denied/threat overlay
+
+### Policy \& Rule Management
+
+* **Firewall Rule Utilization** — identifies unused or heavily-used rules for policy optimization
+* **Configuration Change Log** — tracks who changed what and when
+
+### Compliance \& Audit
+
+* **URL / Web Filtering** — website category access tracking (social, gambling, malicious, etc.)
+* **Top Websites Accessed** — most visited destinations by hit count and user count
+* **Admin Activity Report** — every administrator action on the firewall console
+* **Event Type Summary** — overview of all event types for compliance dashboards
+* **Geo-IP \& Botnet Blocks** — connections blocked by geographic or botnet filtering
 
 ### Alerts
-- **6 pre-configured alert rules**: high denied volume, port scans, failed admin/VPN logins, IPS threats, config changes
-- **Alerts dashboard** with rule status, trigger counts, and event history
-- Extensible alert rules stored in the database
+
+* **6 pre-configured alert rules**: high denied volume, port scans, failed admin/VPN logins, IPS threats, config changes
+* **Alerts dashboard** with rule status, trigger counts, and event history
+* Extensible alert rules stored in the database
 
 ### Web UI
-- **Dashboard** with real-time stats, Chart.js charts, severity breakdown, top hosts, recent critical events
-- **Advanced log search** with filters for hostname, IP, severity, facility, app name, date range, full-text
-- **Report viewer** with charts (bar, line, doughnut), data tables, time period selector (1h to 90d)
-- **Host management GUI** to register and track syslog sources with SonicWall config guide built in
-- **Live tail** view for real-time log monitoring
-- **CSV export** for logs and reports
-- **User authentication** with admin and viewer roles
-- **Dark-themed professional interface** with responsive design
+
+* **Dashboard** with real-time stats, Chart.js charts, severity breakdown, top hosts, recent critical events
+* **Advanced log search** with filters for hostname, IP, severity, facility, app name, date range, full-text
+* **Report viewer** with charts (bar, line, doughnut), data tables, time period selector (1h to 90d)
+* **Host management GUI** to register and track syslog sources with SonicWall config guide built in
+* **Live tail** view for real-time log monitoring
+* **CSV export** for logs and reports
+* **User authentication** with admin and viewer roles
+* **Dark-themed professional interface** with responsive design
 
 ## Architecture
 
@@ -79,10 +87,10 @@ A self-hosted syslog collection and **firewall analytics** server with 20+ built
 ┌──────────────────┐     ┌─────────────────────────┐     ┌──────────────┐
 │  SonicWall / Any │────▶│    Syslog Receiver       │────▶│   MariaDB    │
 │  Syslog Source   │     │   (Python daemon)        │     │              │
-│                  │     │                          │     │ syslog_entries│
+│                  │     │                          │     │ syslog\_entries│
 │  UDP/514         │     │  - UDP/TCP/TLS/DTLS      │     │ (raw logs)   │
 │  TCP/514         │     │  - RFC 3164/5424 parse   │     │              │
-│  TLS/6514        │     │  - SonicWall KV parser ──┼────▶│ fw_events    │
+│  TLS/6514        │     │  - SonicWall KV parser ──┼────▶│ fw\_events    │
 │  DTLS/6514       │     │  - Event classification  │     │ (parsed)     │
 └──────────────────┘     └─────────────────────────┘     └──────┬───────┘
                                                                 │
@@ -103,16 +111,16 @@ A self-hosted syslog collection and **firewall analytics** server with 20+ built
 
 ## Requirements
 
-- Ubuntu 22.04 LTS or 24.04 LTS
-- Root/sudo access
-- At least 2 GB RAM (4 GB recommended)
-- Sufficient disk for log storage
+* Ubuntu 22.04 LTS or 24.04 LTS
+* Root/sudo access
+* At least 2 GB RAM (4 GB recommended)
+* Sufficient disk for log storage
 
 ## Quick Install
 
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/sonicwall-advanced-syslog-server.git
+git clone https://github.com/YOUR\_USERNAME/sonicwall-advanced-syslog-server.git
 cd sonicwall-advanced-syslog-server
 
 # Run the installer
@@ -120,7 +128,22 @@ chmod +x install.sh
 sudo ./install.sh
 ```
 
+HOTFIX:
+
+Apply after deploy.
+
+\---
+
+tar -xzf sonicwall-advanced-syslog-hotfix.tar.gz
+
+cd syslog-server
+
+sudo ./hotfix\_performance.sh
+
+\---
+
 The installer will prompt for:
+
 1. **MariaDB root password** — for initial database setup
 2. **Syslog database user password** — used by the application
 3. **Web admin password** — for the web UI (default: admin)
@@ -153,9 +176,10 @@ For the reports and analytics to work properly, your SonicWall **must** be confi
 3. Click **Add** to create a new syslog server
 4. Enter the syslog server's IP address
 5. Choose your protocol and port:
-   - **UDP 514** — Standard (fastest, no encryption)
-   - **TCP 514** — Reliable delivery, no encryption
-   - **TCP 6514** — TLS encrypted (recommended)
+
+   * **UDP 514** — Standard (fastest, no encryption)
+   * **TCP 514** — Reliable delivery, no encryption
+   * **TCP 6514** — TLS encrypted (recommended)
 6. **Set Syslog Format to `Enhanced Syslog`** — this is critical for reports
 7. Click the Configure icon and **Select All** enhanced syslog fields
 8. Set the **Syslog ID** to `firewall`
@@ -163,18 +187,19 @@ For the reports and analytics to work properly, your SonicWall **must** be confi
 10. Select which log categories to forward (recommend all)
 11. Click **OK** then **Accept**
 
-> **Important**: Standard syslog format will still be collected and searchable, but the 20 analytics reports require the Enhanced Syslog key=value fields (src, dst, proto, sent, rcvd, rule, etc.)
+> \*\*Important\*\*: Standard syslog format will still be collected and searchable, but the 20 analytics reports require the Enhanced Syslog key=value fields (src, dst, proto, sent, rcvd, rule, etc.)
 
 ### Configure Other Devices
 
 Any syslog-capable device can send logs to this server. Non-SonicWall devices will be stored and searchable in the raw log search, but won't appear in the parsed firewall reports.
 
 **Linux (rsyslog):**
+
 ```bash
 # /etc/rsyslog.d/remote.conf
-*.* @<server-ip>:514          # UDP
-*.* @@<server-ip>:514         # TCP
-*.* @@<server-ip>:6514        # TLS (requires rsyslog-gnutls)
+\*.\* @<server-ip>:514          # UDP
+\*.\* @@<server-ip>:514         # TCP
+\*.\* @@<server-ip>:6514        # TLS (requires rsyslog-gnutls)
 ```
 
 **Generic network devices:**
@@ -184,27 +209,27 @@ Most switches, routers, and APs have a syslog configuration page. Enter the serv
 
 Access reports at `http://<server-ip>:8443/reports`. All reports support configurable time periods (1 hour to 90 days) and CSV export.
 
-| Category | Reports |
-|----------|---------|
-| **Security & Threats** | Top Denied Hosts, Top Denied Destinations, Top Permitted Apps, Threats & Attacks, Threat Summary, Failed Auth, Failed Auth by IP, Top Infected Hosts |
-| **Traffic & Bandwidth** | Top Talkers, Inbound vs Outbound, Top Protocols, VPN Activity, Hourly Traffic Volume |
-| **Policy & Rules** | Rule Utilization, Configuration Change Log |
-| **Compliance & Audit** | URL/Web Filtering, Top Websites, Admin Activity, Event Type Summary, Geo-IP/Botnet Blocks |
+|Category|Reports|
+|-|-|
+|**Security \& Threats**|Top Denied Hosts, Top Denied Destinations, Top Permitted Apps, Threats \& Attacks, Threat Summary, Failed Auth, Failed Auth by IP, Top Infected Hosts|
+|**Traffic \& Bandwidth**|Top Talkers, Inbound vs Outbound, Top Protocols, VPN Activity, Hourly Traffic Volume|
+|**Policy \& Rules**|Rule Utilization, Configuration Change Log|
+|**Compliance \& Audit**|URL/Web Filtering, Top Websites, Admin Activity, Event Type Summary, Geo-IP/Botnet Blocks|
 
 ### Key Data Fields Parsed
 
 The SonicWall parser extracts these fields from each log event:
 
-| Field Group | Parsed Fields |
-|-------------|---------------|
-| **Network** | Source/Dest IP, Port, Interface, Zone, MAC, Hostname |
-| **Traffic** | Bytes Sent/Received, Packets Sent/Received |
-| **Protocol** | Transport (TCP/UDP/ICMP), Application (HTTP/HTTPS/DNS/etc.) |
-| **Policy** | Firewall Action, Rule Name, Session Type |
-| **Security** | IPS SID, IPS Category, IPS Priority |
-| **Web** | URL Category, URL Code, Destination Hostname, URL Path |
-| **Identity** | VPN User, Portal, Domain, Admin User |
-| **Device** | Serial Number, Firmware IP, Message ID, Event Count |
+|Field Group|Parsed Fields|
+|-|-|
+|**Network**|Source/Dest IP, Port, Interface, Zone, MAC, Hostname|
+|**Traffic**|Bytes Sent/Received, Packets Sent/Received|
+|**Protocol**|Transport (TCP/UDP/ICMP), Application (HTTP/HTTPS/DNS/etc.)|
+|**Policy**|Firewall Action, Rule Name, Session Type|
+|**Security**|IPS SID, IPS Category, IPS Priority|
+|**Web**|URL Category, URL Code, Destination Hostname, URL Path|
+|**Identity**|VPN User, Portal, Domain, Admin User|
+|**Device**|Serial Number, Firmware IP, Message ID, Event Count|
 
 ## Alerts
 
@@ -217,7 +242,7 @@ Access at `http://<server-ip>:8443/alerts`. Six pre-configured alert rules monit
 5. **IPS threat detected** — any IPS/threat event
 6. **Configuration change** — any rule add/delete/modify event
 
-Alert rules are stored in the `alert_rules` database table and can be customized via SQL.
+Alert rules are stored in the `alert\_rules` database table and can be customized via SQL.
 
 ## Service Management
 
@@ -242,27 +267,28 @@ sudo systemctl stop syslog-receiver syslog-web
 
 Edit `/etc/syslog-server/config.json`:
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `db_host` | 127.0.0.1 | MariaDB host |
-| `db_port` | 3306 | MariaDB port |
-| `db_user` | syslog | Database username |
-| `db_password` | — | Database password |
-| `db_name` | syslog_db | Database name |
-| `db_pool_size` | 5 | Connection pool size |
-| `udp_port` | 514 | Standard UDP syslog port |
-| `tcp_port` | 514 | Standard TCP syslog port |
-| `tls_port` | 6514 | TLS syslog port |
-| `dtls_port` | 6514 | DTLS syslog port |
-| `tls_cert` | — | Path to server TLS certificate |
-| `tls_key` | — | Path to server TLS private key |
-| `tls_ca` | — | Path to CA certificate |
-| `batch_size` | 50 | DB insert batch size |
-| `batch_timeout` | 2.0 | Max seconds before flushing batch |
-| `web_port` | 8443 | Web UI port |
-| `log_level` | INFO | Logging level (DEBUG/INFO/WARNING/ERROR) |
+|Setting|Default|Description|
+|-|-|-|
+|`db\_host`|127.0.0.1|MariaDB host|
+|`db\_port`|3306|MariaDB port|
+|`db\_user`|syslog|Database username|
+|`db\_password`|—|Database password|
+|`db\_name`|syslog\_db|Database name|
+|`db\_pool\_size`|5|Connection pool size|
+|`udp\_port`|514|Standard UDP syslog port|
+|`tcp\_port`|514|Standard TCP syslog port|
+|`tls\_port`|6514|TLS syslog port|
+|`dtls\_port`|6514|DTLS syslog port|
+|`tls\_cert`|—|Path to server TLS certificate|
+|`tls\_key`|—|Path to server TLS private key|
+|`tls\_ca`|—|Path to CA certificate|
+|`batch\_size`|50|DB insert batch size|
+|`batch\_timeout`|2.0|Max seconds before flushing batch|
+|`web\_port`|8443|Web UI port|
+|`log\_level`|INFO|Logging level (DEBUG/INFO/WARNING/ERROR)|
 
 After editing, restart both services:
+
 ```bash
 sudo systemctl restart syslog-receiver syslog-web
 ```
@@ -271,16 +297,16 @@ sudo systemctl restart syslog-receiver syslog-web
 
 ### Tables
 
-| Table | Purpose |
-|-------|---------|
-| `syslog_entries` | Raw syslog messages (all sources) |
-| `fw_events` | Parsed firewall events with 50+ structured fields |
-| `fw_message_ids` | SonicWall message ID reference (60+ entries) |
-| `syslog_hosts` | Registered host entries |
-| `alert_rules` | Alert rule definitions |
-| `alert_log` | Triggered alert history |
-| `app_settings` | Application configuration |
-| `users` | Web UI user accounts |
+|Table|Purpose|
+|-|-|
+|`syslog\_entries`|Raw syslog messages (all sources)|
+|`fw\_events`|Parsed firewall events with 50+ structured fields|
+|`fw\_message\_ids`|SonicWall message ID reference (60+ entries)|
+|`syslog\_hosts`|Registered host entries|
+|`alert\_rules`|Alert rule definitions|
+|`alert\_log`|Triggered alert history|
+|`app\_settings`|Application configuration|
+|`users`|Web UI user accounts|
 
 ### Maintenance
 
@@ -288,20 +314,20 @@ Automatic log cleanup runs daily at 3:00 AM UTC. Configure retention via the web
 
 ```bash
 # Manual cleanup
-mysql -u root -p syslog_db -e "CALL cleanup_old_logs();"
+mysql -u root -p syslog\_db -e "CALL cleanup\_old\_logs();"
 
 # Database size check
-mysql -u root -p syslog_db -e "
-  SELECT table_name,
-    ROUND(data_length / 1024 / 1024, 2) AS data_mb,
-    ROUND(index_length / 1024 / 1024, 2) AS index_mb,
-    table_rows
-  FROM information_schema.tables
-  WHERE table_schema = 'syslog_db';
+mysql -u root -p syslog\_db -e "
+  SELECT table\_name,
+    ROUND(data\_length / 1024 / 1024, 2) AS data\_mb,
+    ROUND(index\_length / 1024 / 1024, 2) AS index\_mb,
+    table\_rows
+  FROM information\_schema.tables
+  WHERE table\_schema = 'syslog\_db';
 "
 
 # Backup
-mysqldump -u root -p syslog_db > syslog_backup_$(date +%Y%m%d).sql
+mysqldump -u root -p syslog\_db > syslog\_backup\_$(date +%Y%m%d).sql
 ```
 
 ## Using Your Own TLS Certificates
@@ -310,7 +336,7 @@ mysqldump -u root -p syslog_db > syslog_backup_$(date +%Y%m%d).sql
 sudo cp your-cert.crt /etc/syslog-server/certs/server.crt
 sudo cp your-cert.key /etc/syslog-server/certs/server.key
 sudo cp your-ca.crt   /etc/syslog-server/certs/ca.crt
-sudo chown syslog-server:syslog-server /etc/syslog-server/certs/*
+sudo chown syslog-server:syslog-server /etc/syslog-server/certs/\*
 sudo chmod 600 /etc/syslog-server/certs/server.key
 sudo systemctl restart syslog-receiver
 ```
@@ -325,62 +351,66 @@ sudo apt install nginx certbot python3-certbot-nginx
 sudo tee /etc/nginx/sites-available/syslog <<'EOF'
 server {
     listen 443 ssl;
-    server_name syslog.yourdomain.com;
-    ssl_certificate     /etc/letsencrypt/live/syslog.yourdomain.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/syslog.yourdomain.com/privkey.pem;
+    server\_name syslog.yourdomain.com;
+    ssl\_certificate     /etc/letsencrypt/live/syslog.yourdomain.com/fullchain.pem;
+    ssl\_certificate\_key /etc/letsencrypt/live/syslog.yourdomain.com/privkey.pem;
     location / {
-        proxy_pass http://127.0.0.1:8443;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy\_pass http://127.0.0.1:8443;
+        proxy\_set\_header Host $host;
+        proxy\_set\_header X-Real-IP $remote\_addr;
+        proxy\_set\_header X-Forwarded-For $proxy\_add\_x\_forwarded\_for;
+        proxy\_set\_header X-Forwarded-Proto $scheme;
     }
 }
 server {
     listen 80;
-    server_name syslog.yourdomain.com;
-    return 301 https://$server_name$request_uri;
+    server\_name syslog.yourdomain.com;
+    return 301 https://$server\_name$request\_uri;
 }
 EOF
 
 sudo ln -s /etc/nginx/sites-available/syslog /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl reload nginx
+sudo nginx -t \&\& sudo systemctl reload nginx
 ```
 
 ## Testing
 
 ```bash
 # Standard syslog test
-echo "<14>$(date '+%b %d %H:%M:%S') testhost myapp[1234]: Test message" | nc -u -w1 localhost 514
+echo "<14>$(date '+%b %d %H:%M:%S') testhost myapp\[1234]: Test message" | nc -u -w1 localhost 514
 
-# SonicWall-format test (will be parsed into fw_events)
-echo '<134> id=firewall sn=TEST123 time="2026-03-13 12:00:00" fw=10.0.0.1 pri=6 c=1024 m=97 msg="Web site hit" src=192.168.1.10:12345:X0 srcZone=LAN dst=93.184.216.34:443:X1 dstZone=WAN proto=tcp/https sent=1024 rcvd=4096 rule="Allow LAN to WAN" dstname=example.com Category="Information Technology" fw_action="forward"' | nc -u -w1 localhost 514
+# SonicWall-format test (will be parsed into fw\_events)
+echo '<134> id=firewall sn=TEST123 time="2026-03-13 12:00:00" fw=10.0.0.1 pri=6 c=1024 m=97 msg="Web site hit" src=192.168.1.10:12345:X0 srcZone=LAN dst=93.184.216.34:443:X1 dstZone=WAN proto=tcp/https sent=1024 rcvd=4096 rule="Allow LAN to WAN" dstname=example.com Category="Information Technology" fw\_action="forward"' | nc -u -w1 localhost 514
 
 # TLS test
-echo "<14>$(date '+%b %d %H:%M:%S') testhost myapp: TLS test" | \
-  openssl s_client -connect localhost:6514 -CAfile /etc/syslog-server/certs/ca.crt -quiet 2>/dev/null
+echo "<14>$(date '+%b %d %H:%M:%S') testhost myapp: TLS test" | \\
+  openssl s\_client -connect localhost:6514 -CAfile /etc/syslog-server/certs/ca.crt -quiet 2>/dev/null
 ```
 
 ## Troubleshooting
 
 **Services not starting:**
+
 ```bash
 sudo journalctl -u syslog-receiver -n 50 --no-pager
 sudo journalctl -u syslog-web -n 50 --no-pager
 ```
 
 **Reports showing no data:**
-- Verify SonicWall is using **Enhanced Syslog** format (not Default or ArcSight)
-- Check that logs contain `id=firewall` key-value pairs
-- Look at raw logs in Log Search to confirm format
-- Check `fw_events` table: `mysql -u root -p syslog_db -e "SELECT COUNT(*) FROM fw_events;"`
+
+* Verify SonicWall is using **Enhanced Syslog** format (not Default or ArcSight)
+* Check that logs contain `id=firewall` key-value pairs
+* Look at raw logs in Log Search to confirm format
+* Check `fw\_events` table: `mysql -u root -p syslog\_db -e "SELECT COUNT(\*) FROM fw\_events;"`
 
 **Permission denied on port 514:**
+
 ```bash
-sudo setcap cap_net_bind_service=+ep /opt/syslog-server/venv/bin/python3
+sudo setcap cap\_net\_bind\_service=+ep /opt/syslog-server/venv/bin/python3
 ```
 
 **No logs appearing:**
+
 ```bash
 sudo ss -ulnp | grep 514
 sudo ss -tlnp | grep 514
@@ -389,20 +419,20 @@ sudo tcpdump -i any port 514 -n
 
 ## File Locations
 
-| Path | Description |
-|------|-------------|
-| `/opt/syslog-server/` | Application code |
-| `/opt/syslog-server/fw_parser.py` | SonicWall log parser |
-| `/opt/syslog-server/reports.py` | Report engine (20 reports) |
-| `/etc/syslog-server/config.json` | Configuration |
-| `/etc/syslog-server/certs/` | TLS certificates |
-| `/var/log/syslog-server/` | Application logs |
-| `/etc/systemd/system/syslog-receiver.service` | Receiver service |
-| `/etc/systemd/system/syslog-web.service` | Web UI service |
+|Path|Description|
+|-|-|
+|`/opt/syslog-server/`|Application code|
+|`/opt/syslog-server/fw\_parser.py`|SonicWall log parser|
+|`/opt/syslog-server/reports.py`|Report engine (20 reports)|
+|`/etc/syslog-server/config.json`|Configuration|
+|`/etc/syslog-server/certs/`|TLS certificates|
+|`/var/log/syslog-server/`|Application logs|
+|`/etc/systemd/system/syslog-receiver.service`|Receiver service|
+|`/etc/systemd/system/syslog-web.service`|Web UI service|
 
 ## Related Projects
 
-- **[Sonicwall Syslog Server v1.0](https://github.com/YOUR_USERNAME/sonicwall-syslog-server)** — Lightweight syslog collection with search and host management (no analytics/reports)
+* [**Sonicwall Syslog Server v1.0**](https://github.com/YOUR_USERNAME/sonicwall-syslog-server) — Lightweight syslog collection with search and host management (no analytics/reports)
 
 ## Uninstall
 
@@ -417,9 +447,10 @@ sudo rm -rf /etc/syslog-server
 sudo rm -rf /var/log/syslog-server
 sudo userdel syslog-server
 # Optionally drop the database:
-# mysql -u root -p -e "DROP DATABASE syslog_db; DROP USER 'syslog'@'localhost';"
+# mysql -u root -p -e "DROP DATABASE syslog\_db; DROP USER 'syslog'@'localhost';"
 ```
 
 ## License
 
 This project is provided under the [MIT License](LICENSE) for personal and commercial use.
+
