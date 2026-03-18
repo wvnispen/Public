@@ -5,6 +5,56 @@ All notable changes to the Sonicwall Advanced Syslog Server project will be docu
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-03-18
+
+### Added
+- **Pre-computed dashboard statistics** — dashboard now reads from `dashboard_stats` table updated every 60 seconds by a background worker, eliminating all multi-million row scans
+- **Hourly rollup table** (`hourly_stats`) — aggregates per-hour per-host event counts, severity breakdowns, bytes, denied/threat counts; dashboard charts and counters read from this instead of scanning `syslog_entries`
+- **Stats worker** (`stats_worker.py`) — background thread in the syslog receiver that incrementally updates `hourly_stats` from the last 2 hours of data, then calls `refresh_dashboard_stats()` stored procedure
+- **MariaDB scheduled event** (`evt_refresh_dashboard`) — refreshes dashboard stats every 1 minute as a safety net alongside the stats worker
+- **Schema upgrade script** (`schema_upgrade_v1.2.sql`) with `dashboard_stats` table, `hourly_stats` table, and `refresh_dashboard_stats` stored procedure
+- **Upgrade script** (`upgrade_v1.2.sh`) for existing v1.1.x installations — includes initial stats seeding
+
+### Changed
+- **Dashboard page** loads in milliseconds regardless of table size (was 25+ seconds at 8M+ rows)
+- **Dashboard API** (`/api/stats`) reads pre-computed values instead of running `COUNT(*)` queries
+- **Recent critical logs** query bounded to last 1 hour (was 24 hours)
+- Install script now deploys all schema files including v1.2
+
+### Includes all v1.1.1 fixes
+- MariaDB buffer pool auto-tuning (128 MB → auto-scaled to RAM)
+- InnoDB batch flush mode and larger log file
+- DB connection pool health checks and auto-reconnect
+- Gunicorn: 3 workers × 2 threads, 30s timeout, worker recycling
+- Fixed Gunicorn read-only filesystem error
+- Removed broken python3-dtls dependency
+- Fixed datetime.utcnow() deprecation warnings
+
+## [1.1.1] - 2026-03-16
+
+### Fixed
+- **Dashboard query performance** — total log count now uses fast `information_schema.table_rows` instead of `COUNT(*)` full table scan on multi-million row tables
+- **Recent critical logs query** — bounded to last 24 hours; previously scanned entire `syslog_entries` table with no time limit
+- **Unique hosts count** — bounded to last 24 hours instead of `COUNT(DISTINCT)` across all rows
+- **Database connection pool exhaustion** — added connection health checks (`ping`/reconnect) and `pool_reset_session` to prevent stale connections from hanging Gunicorn workers
+- **Gunicorn worker hangs** — reduced timeout from 120s to 30s (fast-fail), added `--max-requests 1000` with jitter to recycle workers and prevent memory/connection leaks
+- **Gunicorn read-only filesystem error** — added `/tmp` to `ReadWritePaths` in systemd service for Gunicorn control socket
+- **`datetime.utcnow()` deprecation warnings** — replaced with `datetime.now(timezone.utc)` across all Python files
+- **DTLS `libcrypto.so.1.1` crash on startup** — removed `python3-dtls` dependency (incompatible with Ubuntu 24.04 OpenSSL 3.x); DTLS listener falls back cleanly to plain UDP
+
+### Added
+- **MariaDB performance tuning config** (`mariadb-tuning.cnf`) deployed to `/etc/mysql/mariadb.conf.d/99-syslog-tuning.cnf`
+  - `innodb_buffer_pool_size` auto-scaled to system RAM (default 1 GB for 4 GB servers)
+  - `innodb_flush_log_at_trx_commit = 2` for batch write performance
+  - `innodb_log_file_size = 256M` for sustained ingestion throughput
+  - Increased `sort_buffer_size`, `join_buffer_size`, `table_open_cache` for report queries
+- **Upgrade script** (`upgrade_v1.1.1.sh`) for existing v1.1.0 installations
+
+### Changed
+- Gunicorn workers increased from 2 sync to 3 workers × 2 threads (6 concurrent requests)
+- DB connection pool now uses `connection_timeout=10` and `autocommit=True`
+- Install script auto-detects RAM and scales MariaDB buffer pool accordingly
+
 ## [1.1.0] - 2026-03-13
 
 ### Added
