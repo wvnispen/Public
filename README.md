@@ -1,6 +1,6 @@
 # Public
 
-My projects for everyone to use free with no guaranty or warranty. These are for non productive use only.
+My projects for everyone to use free with no guaranty or warranty. These are for non production use only.
 
 
 
