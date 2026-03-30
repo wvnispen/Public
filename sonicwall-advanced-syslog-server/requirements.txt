@@ -1,5 +1,0 @@
-flask>=3.0
-mysql-connector-python>=8.0
-gunicorn>=21.2
-# Note: python3-dtls removed — requires OpenSSL 1.1 which is not available
-# on Ubuntu 24.04 (ships OpenSSL 3.x). DTLS listener falls back to plain UDP.
